@@ -324,6 +324,72 @@ async function createBank(event) {
   button.disabled = false;
 }
 
+// ── 模型名自动探测（防抖）──
+let modelProbeTimer = null;
+let modelProbeToken = 0;
+let modelOptions = [];
+
+function renderModelMenu(filter) {
+  const menu = byId("model-menu");
+  const keyword = (filter || "").trim().toLowerCase();
+  const list = keyword
+    ? modelOptions.filter((id) => id.toLowerCase().includes(keyword))
+    : modelOptions;
+  if (!list.length) {
+    menu.innerHTML = `<div class="combo-empty">${modelOptions.length ? "没有匹配的模型" : "暂无模型，可手动输入"}</div>`;
+    return;
+  }
+  menu.innerHTML = list.map((id) => `
+    <button class="combo-option" type="button" role="option" data-model-option="${escapeHtml(id)}">${escapeHtml(id)}</button>
+  `).join("");
+  document.querySelectorAll("[data-model-option]").forEach((node) => {
+    node.addEventListener("click", () => {
+      byId("test-api-model").value = node.dataset.modelOption;
+      closeModelMenu();
+    });
+  });
+}
+
+function openModelMenu() {
+  renderModelMenu(byId("test-api-model").value);
+  byId("model-menu").hidden = false;
+  byId("test-api-model").setAttribute("aria-expanded", "true");
+}
+
+function closeModelMenu() {
+  byId("model-menu").hidden = true;
+  byId("test-api-model").setAttribute("aria-expanded", "false");
+}
+
+function probeModels() {
+  window.clearTimeout(modelProbeTimer);
+  modelProbeTimer = window.setTimeout(runModelProbe, 500);   // 防抖：停止输入 500ms 后才发请求
+}
+
+async function runModelProbe() {
+  const baseUrl = byId("test-api-base").value.trim();
+  const apiKey = byId("test-api-key").value;
+  if (!baseUrl || !apiKey) {
+    modelOptions = [];
+    closeModelMenu();
+    return;
+  }
+  const token = ++modelProbeToken;   // 防止旧请求覆盖新结果
+  try {
+    const query = new URLSearchParams({ base_url: baseUrl, api_key: apiKey });
+    const response = await fetch(`/api/models?${query}`);
+    if (token !== modelProbeToken) return;
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "探测失败");
+    modelOptions = payload.models || [];
+    setMessage(byId("model-probe-message"), modelOptions.length ? `探测到 ${modelOptions.length} 个模型` : "未探测到模型，请手动填写", modelOptions.length ? "success" : "working");
+  } catch (error) {
+    if (token !== modelProbeToken) return;
+    modelOptions = [];
+    setMessage(byId("model-probe-message"), `模型探测失败：${error.message}`, "working");
+  }
+}
+
 document.querySelectorAll("[data-workspace]").forEach((button) => button.addEventListener("click", () => activateWorkspace(button.dataset.workspace)));
 document.querySelectorAll("[data-test-mode]").forEach((button) => button.addEventListener("click", () => activateMode("test", button.dataset.testMode)));
 byId("bank-select").addEventListener("change", (event) => selectBank(event.target.value));
@@ -334,5 +400,25 @@ byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);
 
+byId("test-api-base").addEventListener("input", probeModels);
+byId("test-api-key").addEventListener("input", probeModels);
+
+// 模型下拉：点击展开、输入过滤、失焦/点击外部关闭
+byId("test-api-model").addEventListener("focus", openModelMenu);
+byId("test-api-model").addEventListener("input", openModelMenu);
+byId("model-combo-toggle").addEventListener("click", () => {
+  if (byId("model-menu").hidden) {
+    byId("test-api-model").focus();
+    openModelMenu();
+  } else {
+    closeModelMenu();
+  }
+});
+byId("model-combo").addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeModelMenu();
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#model-combo")) closeModelMenu();
+});
 renderInventory();
 loadChallenges();

@@ -207,6 +207,47 @@ class UpstreamError(RuntimeError):
         self.body = body
 
 
+def list_models(base_url: str, api_key: str) -> list[str]:
+    """拉取上游 /models 列表，供模型名自动补全。失败时抛 UpstreamError。"""
+    if not base_url:
+        raise ValueError("请先填写 Base URL")
+    normalized = base_url.rstrip("/")
+    if is_absolute_endpoint(normalized):
+        normalized = normalized[:-1]
+    # /models 属于 OpenAI 风格路径；Codex 的 /responses 端点没有它，回退到去掉末尾端点段
+    if normalized.endswith("/responses"):
+        normalized = normalized[: -len("/responses")]
+    url = normalized + "/models" if normalized.endswith("/v1") else normalized + "/v1/models"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": upstream_user_agent(),
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8", errors="replace").strip()
+        raise UpstreamError(f"HTTP {error.code}: {_compact_upstream_error(body, error.reason)}", error.code, body) from error
+    except urllib.error.URLError as error:
+        reason = getattr(error, "reason", str(error))
+        raise UpstreamError(f"无法连接接口：{reason}", 0, str(reason)) from error
+    items = payload.get("data") if isinstance(payload, dict) else None
+    if items is None:
+        items = payload.get("models") if isinstance(payload, dict) else None
+    if not isinstance(items, list):
+        raise UpstreamError("上游返回中没有模型列表", 200, json.dumps(payload, ensure_ascii=False)[:500])
+    return sorted(
+        str(item.get("id") or item.get("name"))
+        for item in items
+        if isinstance(item, dict) and (item.get("id") or item.get("name"))
+    )
+
+
 def _looks_like_waf_block(text: str) -> bool:
     lowered = text.lower()
     return any(

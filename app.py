@@ -12,6 +12,7 @@ from enrollment import (
     UpstreamError,
     bank_summary,
     enroll_automatic,
+    list_models,
     request_completion,
     test_automatic,
 )
@@ -241,6 +242,23 @@ def automatic_test_probe():
         ), 502
     except Exception as error:
         return jsonify({"error": str(error)}), 502
+
+
+@app.get("/api/models")
+def list_upstream_models():
+    """按 base_url + api_key 拉取上游模型列表，供前端模型名自动补全。"""
+    try:
+        models = list_models(
+            base_url=request.args.get("base_url", "").strip(),
+            api_key=request.args.get("api_key", ""),
+        )
+        return jsonify({"models": models})
+    except ValueError as error:
+        return jsonify({"error": str(error), "models": []}), 400
+    except UpstreamError as error:
+        return jsonify({"error": str(error), "status": error.status, "body": error.body, "models": []}), 502
+    except Exception as error:
+        return jsonify({"error": str(error), "models": []}), 502
 
 
 @app.get("/api/bank")
