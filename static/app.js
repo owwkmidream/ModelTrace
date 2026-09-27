@@ -595,31 +595,21 @@ function renderHistory() {
         </summary>
         <div class="history-detail">
           <div class="history-hero">
-            <div class="history-hero-main">
+            <div class="history-hero-col">
               <span class="history-hero-label">模型名</span>
               <strong class="history-hero-value">${escapeHtml(entry.api_model)}</strong>
+              <span class="history-hero-sub">温度 ${entry.temperature === null || entry.temperature === undefined ? "接口默认" : escapeHtml(String(entry.temperature))} · 耗时 ${(entry.latency_ms / 1000).toFixed(1)} 秒</span>
             </div>
-            <div class="history-hero-main">
+            <div class="history-hero-col">
               <span class="history-hero-label">地址</span>
               <strong class="history-hero-value mono">${escapeHtml(entry.base_url)}</strong>
+              <span class="history-hero-sub">密钥 <span class="history-secret mono" data-secret="${escapeHtml(entry.api_key)}" title="点击展开/收起">${escapeHtml(maskKey(entry.api_key))}</span></span>
             </div>
-            <div class="history-hero-side">
-              <span class="history-hero-label">密钥</span>
-              <span class="history-secret mono" data-secret="${escapeHtml(entry.api_key)}" title="点击展开/收起">${escapeHtml(maskKey(entry.api_key))}</span>
-            </div>
-            <div class="history-hero-side">
-              <span class="history-hero-label">温度</span>
-              <span>${entry.temperature === null || entry.temperature === undefined ? "接口默认" : escapeHtml(String(entry.temperature))}</span>
-            </div>
-            <div class="history-hero-side">
-              <span class="history-hero-label">耗时</span>
-              <span>${(entry.latency_ms / 1000).toFixed(1)} 秒</span>
-            </div>
+            <label class="history-hero-col history-note-field">
+              <span class="history-hero-label">备注</span>
+              <textarea class="history-note-input" data-note="${entry.id}" rows="2" placeholder="给这次记录起个名字，方便回头找">${escapeHtml(entry.note || "")}</textarea>
+            </label>
           </div>
-          <label class="history-note-field">
-            <span>备注</span>
-            <input class="history-note-input" data-note="${entry.id}" value="${escapeHtml(entry.note || "")}" placeholder="给这次记录起个名字，方便回头找">
-          </label>
           ${failures ? `<div class="history-failures"><strong>失败响应</strong><ul>${failures}</ul></div>` : ""}
           <div class="history-result">${entry.result ? renderResultHtml(entry.result) : `<p class="empty-inventory">本次测试没有产生归因结果</p>`}</div>
           <div class="action-row"><button class="button secondary" type="button" data-delete-history="${entry.id}">删除这条记录</button></div>

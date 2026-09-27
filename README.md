@@ -15,6 +15,12 @@ python start.py
 
 `static/index.html` 是不依赖后端的手动测试版本，归因计算和指纹库读取都在浏览器本地完成。仓库附带的 GitHub Actions 会将 `static/` 部署到 GitHub Pages。
 
+## Cloudflare Workers
+
+`worker/` 是部署到 Cloudflare Workers 的完整版本：同一个 Worker 既托管页面，又充当前端到上游 API 的薄代理，因此在 Pages 手动版的基础上补回了 API 自动测试。浏览器受 Fetch 规范限制无法设置 `User-Agent`（上游 WAF 会因此返回 403），也读不到没有 CORS 头的跨域响应，这两点只能由服务端代劳。归因评分仍在浏览器本地完成。
+
+推送到 `main` 后由 GitHub Actions 自动部署，详见 [worker/README.md](worker/README.md)。
+
 ## 使用
 
 - **手动测试**：复制三条挑战，分别发送给同一个待测模型，再粘贴每次完整输出。

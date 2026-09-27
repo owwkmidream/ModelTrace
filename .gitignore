@@ -4,3 +4,8 @@ __pycache__/
 *.log
 .venv/
 node_modules/
+
+# Worker 构建产物：由 worker/build.mjs 从 static/ 与 templates/ 生成，不入库避免副本漂移
+worker/public/
+# wrangler 本地状态
+worker/.wrangler/
