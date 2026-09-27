@@ -56,6 +56,21 @@
               <label><span>API Key</span><input id="test-api-key" type="password" required autocomplete="off"></label>
               <label><span>温度（可选）</span><input id="test-temperature" type="number" min="0" max="2" step="0.1" placeholder="接口默认"></label>
             </div>
+            <div class="config-panel">
+              <div class="config-column">
+                <span class="config-label">已存配置</span>
+                <div id="config-list" class="config-list"></div>
+              </div>
+              <div class="config-column">
+                <span class="config-label">保存当前 Base URL 与 API Key</span>
+                <div class="config-save-row">
+                  <input id="config-name" placeholder="配置名称" autocomplete="off">
+                  <button id="config-save" class="button primary" type="button">保存</button>
+                </div>
+                <p class="config-hint">保存后点击左侧配置可一键载入；重名即覆盖</p>
+              </div>
+            </div>
+            <div id="config-message" class="message" hidden></div>
             <div id="model-probe-message" class="message" hidden></div>
             <div class="form-footer"><button class="button primary" type="submit">开始测试</button></div>
           </form>

@@ -197,6 +197,48 @@ tbody tr.winner { background: var(--primary-soft); }
   .inventory-summary > div:nth-child(4) { border-top: 1px solid var(--line); }
   .button { width: 100%; }
 }
+
+/* ── 配置存档与历史记录 ── */
+.config-panel {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px;
+  padding: 17px; border-top: 1px solid var(--line);
+}
+.config-column { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.config-label { color: #344054; font-size: 11px; font-weight: 650; }
+.config-list { display: flex; flex-wrap: wrap; gap: 8px; align-content: flex-start; }
+.config-chip {
+  display: inline-flex; align-items: stretch; max-width: 100%;
+  border: 1px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface-soft);   /* 整颗胶囊统一底色，不因悬浮分层 */
+  transition: border-color .15s, box-shadow .15s, background .15s;
+}
+.config-chip:hover { border-color: #a9c4f5; background: var(--surface); }
+.config-chip.active { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37,99,235,.10); }
+.config-chip-main {
+  display: flex; flex-direction: column; gap: 2px; min-width: 0;
+  width: 200px; padding: 7px 11px; border: 0; background: transparent;
+  cursor: pointer; text-align: left;
+}
+.config-chip-main strong { font-size: 12px; font-weight: 600; color: var(--text); }
+.config-chip.active .config-chip-main strong { color: var(--primary-dark); }
+.config-chip-main small {
+  font-size: 10px; color: var(--muted); width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 删除位始终占宽，悬浮只改颜色，胶囊尺寸不跳动 */
+.config-chip-delete {
+  width: 28px; flex: none; padding: 0; border: 0; border-left: 1px solid var(--line);
+  background: transparent; color: var(--muted); font-size: 14px; line-height: 1;
+  cursor: pointer; opacity: 0; transition: opacity .15s, background .15s, color .15s, border-color .15s;
+}
+.config-chip:hover .config-chip-delete { opacity: 1; }
+.config-chip-delete:hover { background: #f9d7d3; color: #8d1f16; border-left-color: #eeb4ad; }
+.config-chip-delete:focus-visible { opacity: 1; outline: 2px solid var(--primary); outline-offset: -2px; }
+.config-save-row { display: flex; gap: 8px; }
+.config-save-row input { flex: 1; min-width: 0; }
+.config-save-row .button { white-space: nowrap; height: 38px; }
+.config-hint { margin: 0; color: var(--muted); font-size: 11px; }
+
 /* ── 模型名下拉（自定义，替换无法改样式的原生 datalist） ── */
 .combo-field { position: relative; }
 .combo { position: relative; display: flex; align-items: center; }

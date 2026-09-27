@@ -7,6 +7,26 @@ const state = {
 
 const byId = (id) => document.getElementById(id);
 
+// ── 本地存档与历史记录（localStorage，纯前端，不上传）──
+const CONFIG_KEY = "modeltrace.configs";
+
+function readStore(key) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(key) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStore(key, value) {
+  window.localStorage.setItem(key, JSON.stringify(value));
+}
+
+function configs() {
+  return readStore(CONFIG_KEY);
+}
+
 function escapeHtml(value) {
   return String(value).replace(/[&<>'"]/g, (character) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;",
@@ -324,6 +344,96 @@ async function createBank(event) {
   button.disabled = false;
 }
 
+// ── 配置存档（Base URL + API Key）──
+let activeConfigId = "";
+
+function configChipHtml(item) {
+  const active = item.id === activeConfigId;
+  return `
+    <div class="config-chip${active ? " active" : ""}" data-config="${escapeHtml(item.id)}">
+      <button class="config-chip-main" type="button" data-config-load="${escapeHtml(item.id)}" title="${escapeHtml(item.base_url)}">
+        <strong>${escapeHtml(item.name)}</strong>
+        <small>${escapeHtml(item.base_url)}</small>
+      </button>
+      <button class="config-chip-delete" type="button" data-delete-config="${escapeHtml(item.id)}" aria-label="删除配置 ${escapeHtml(item.name)}" title="删除">×</button>
+    </div>
+  `;
+}
+
+function renderConfigList() {
+  const list = configs();
+  byId("config-list").innerHTML = list.length
+    ? list.map(configChipHtml).join("")
+    : `<span class="empty-inventory">还没有保存的配置</span>`;
+
+  // 点胶囊本体 = 载入
+  document.querySelectorAll("[data-config-load]").forEach((node) => {
+    node.addEventListener("click", () => applyConfig(node.dataset.configLoad));
+  });
+  // 点尾部删除图标 = 删掉该条
+  document.querySelectorAll("[data-delete-config]").forEach((node) => {
+    node.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const hit = configs().find((item) => item.id === node.dataset.deleteConfig);
+      if (!hit) return;
+      if (!window.confirm(`删除配置「${hit.name}」？`)) return;
+      deleteConfig(node.dataset.deleteConfig);
+    });
+  });
+}
+
+function applyConfig(id) {
+  const hit = configs().find((item) => item.id === id);
+  if (!hit) return;
+  byId("test-api-base").value = hit.base_url;
+  byId("test-api-key").value = hit.api_key;
+  byId("config-name").value = hit.name;   // 回填名字，方便改 URL/Key 后同名覆盖
+  activeConfigId = hit.id;
+  renderConfigList();
+  probeModels();
+  setMessage(byId("config-message"), `已载入「${hit.name}」`, "success");
+}
+
+function saveConfig() {
+  const baseUrl = byId("test-api-base").value.trim();
+  const apiKey = byId("test-api-key").value;
+  const name = byId("config-name").value.trim();
+  if (!baseUrl || !apiKey) {
+    setMessage(byId("config-message"), "先填好 Base URL 和 API Key 再保存。", "error");
+    return;
+  }
+  if (!name) {
+    setMessage(byId("config-message"), "给这个配置起个名字。", "error");
+    return;
+  }
+  const list = configs();
+  // 保存语义只看名字：同名覆盖，不同名新建（改名 = 新建后删掉旧的）
+  const hit = list.find((item) => item.name === name);
+  if (hit) {
+    Object.assign(hit, { base_url: baseUrl, api_key: apiKey });
+    activeConfigId = hit.id;
+  } else {
+    const created = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      name, base_url: baseUrl, api_key: apiKey,
+    };
+    list.push(created);
+    activeConfigId = created.id;
+  }
+  writeStore(CONFIG_KEY, list);
+  renderConfigList();
+  setMessage(byId("config-message"), hit ? `已覆盖「${name}」` : `已新建「${name}」`, "success");
+}
+
+function deleteConfig(id) {
+  const hit = configs().find((item) => item.id === id);
+  if (!hit) return;
+  writeStore(CONFIG_KEY, configs().filter((item) => item.id !== id));
+  if (activeConfigId === id) activeConfigId = "";
+  renderConfigList();
+  setMessage(byId("config-message"), `已删除「${hit.name}」`, "success");
+}
+
 // ── 模型名自动探测（防抖）──
 let modelProbeTimer = null;
 let modelProbeToken = 0;
@@ -400,6 +510,7 @@ byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);
 
+byId("config-save").addEventListener("click", saveConfig);
 byId("test-api-base").addEventListener("input", probeModels);
 byId("test-api-key").addEventListener("input", probeModels);
 
@@ -420,5 +531,6 @@ byId("model-combo").addEventListener("keydown", (event) => {
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-combo")) closeModelMenu();
 });
+renderConfigList();
 renderInventory();
 loadChallenges();
