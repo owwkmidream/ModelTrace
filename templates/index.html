@@ -66,7 +66,10 @@
               <div class="config-column">
                 <span class="config-label">保存当前 Base URL 与 API Key</span>
                 <div class="config-save-row">
-                  <input id="config-name" placeholder="配置名称" autocomplete="off">
+                  <div class="config-name-field">
+                    <input id="config-name" placeholder="配置名称" autocomplete="off">
+                    <button class="input-clear" id="config-name-clear" type="button" aria-label="清空配置名称" title="清空" tabindex="-1" hidden>×</button>
+                  </div>
                   <button id="config-save" class="button primary" type="button">保存</button>
                 </div>
                 <p class="config-hint">保存后点击左侧配置可一键载入；重名即覆盖</p>
@@ -132,8 +135,16 @@
           </div>
         </div>
 
-        <div class="panel-toolbar">
+        <div class="panel-toolbar history-toolbar">
           <input id="history-search" placeholder="按备注 / 模型名 / 地址筛选" autocomplete="off">
+          <div class="history-filter" role="radiogroup" aria-label="模型是否一致">
+            <span class="history-filter-label">模型一致性</span>
+            <div class="segmented">
+              <button class="segmented-item active" type="button" role="radio" aria-checked="true" data-model-consistency="all">全部</button>
+              <button class="segmented-item" type="button" role="radio" aria-checked="false" data-model-consistency="same">一致</button>
+              <button class="segmented-item" type="button" role="radio" aria-checked="false" data-model-consistency="diff">不一致</button>
+            </div>
+          </div>
         </div>
 
         <div id="history-list" class="history-list"></div>

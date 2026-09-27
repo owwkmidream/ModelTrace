@@ -275,6 +275,17 @@ tbody tr.winner { background: var(--primary-soft); }
 .config-chip-delete:focus-visible { opacity: 1; outline: 2px solid var(--primary); outline-offset: -2px; }
 .config-save-row { display: flex; gap: 8px; }
 .config-save-row input { flex: 1; min-width: 0; }
+/* 配置名输入框：右侧留出清除图标的位置，图标在无内容时隐藏 */
+.config-name-field { position: relative; flex: 1; min-width: 0; }
+.config-name-field input { padding-right: 34px; }
+.input-clear {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.input-clear[hidden] { display: none; }
+.input-clear:hover { background: var(--primary-soft); color: var(--primary-dark); }
 .config-save-row .button { white-space: nowrap; height: 38px; }
 .config-hint { margin: 0; color: var(--muted); font-size: 11px; }
 
@@ -299,6 +310,22 @@ tbody tr.winner { background: var(--primary-soft); }
 .history-badge.url { font-family: ui-monospace, monospace; font-weight: 500; }
 /* 备注徽章是用户自己的标注，与线路区分的蓝色分开，用暖色 */
 .history-note { color: var(--warning); background: var(--warning-soft); border: 1px solid #eedca6; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 650; }
+/* 耗时贴在折叠栏尾部：推到最右侧，与左侧元数据拉开，扫视时一眼看到 */
+.history-duration { margin-left: auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ── 历史记录筛选栏：搜索框 + 模型一致性互斥筛选 ── */
+.history-toolbar { gap: 12px; flex-wrap: wrap; }
+.history-toolbar #history-search { flex: 1; min-width: 200px; }
+.history-filter { display: flex; align-items: center; gap: 8px; }
+.history-filter-label { color: var(--muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
+/* 互斥筛选用分段按钮：圆角矩形，选中态实心蓝，与单选框圆点区分开 */
+.segmented { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: #edf0f3; }
+.segmented-item {
+  min-width: 62px; padding: 6px 12px; color: var(--muted); border: 0;
+  border-radius: 6px; background: transparent; font-size: 12px; font-weight: 650;
+}
+.segmented-item:hover { color: var(--text); }
+.segmented-item.active { color: white; background: var(--primary); box-shadow: 0 1px 2px rgba(16,24,40,.12); }
 
 .history-detail { padding: 14px 15px; display: flex; flex-direction: column; gap: 14px; }
 /* 元数据三列：模型名 / 地址 / 备注。备注并入同一行最右列，不再单独占一条 */

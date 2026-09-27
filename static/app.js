@@ -542,11 +542,47 @@ async function createBank(event) {
 }
 
 // ── 历史记录 ──
+// 当前的一致性筛选：all 全部 / same 实测一致 / diff 实测不一致
+let historyConsistency = "all";
+
 function formatTime(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
   const pad = (value) => String(value).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+// 历史记录折叠栏尾部的耗时：毫秒转秒，保留一位小数
+function formatDuration(ms) {
+  if (ms === null || ms === undefined || Number.isNaN(Number(ms))) return "";
+  return `${(Number(ms) / 1000).toFixed(1)} 秒`;
+}
+
+// 实测归因结果与请求时填的模型名对不上即视为"不一致"。没有结果的记录不参与一致性判定。
+function isModelMismatch(entry) {
+  return Boolean(entry.result && entry.result.prediction_name !== entry.api_model);
+}
+
+// 折叠摘要徽章的染色：按配置名 hash 取一个固定色号。
+// 用 hash 而不是真随机，保证同一个配置每次渲染、每次刷新都是同一种颜色，便于横向比对分类。
+const BADGE_PALETTE = [
+  { color: "#1d4ed8", background: "#eff6ff", border: "#c9dcff" },
+  { color: "#0f766e", background: "#effcf9", border: "#bfe9e0" },
+  { color: "#a15c07", background: "#fff7e6", border: "#f0dcb0" },
+  { color: "#7c3aed", background: "#f6f1ff", border: "#ded0fb" },
+  { color: "#be185d", background: "#fef1f7", border: "#f8cadf" },
+  { color: "#0e7490", background: "#eefaff", border: "#c2e6f2" },
+  { color: "#4d7c0f", background: "#f5fce9", border: "#d8ecb4" },
+  { color: "#b45309", background: "#fff5ed", border: "#f5d7bc" },
+];
+
+function badgePaletteFor(text) {
+  const value = String(text || "");
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) % 100000007;   // 乘 31 滚动，取模防止溢出
+  }
+  return BADGE_PALETTE[hash % BADGE_PALETTE.length];
 }
 
 function historyMatches(entry, keyword) {
@@ -558,11 +594,21 @@ function historyMatches(entry, keyword) {
   return haystack.includes(keyword.toLowerCase());
 }
 
+// 一致性筛选：all 全部；same 实测与请求模型名一致；diff 不一致。
+// 没有归因结果的记录无从判定一致性，只在「全部」里出现。
+function historyMatchesConsistency(entry, mode) {
+  if (mode === "same") return Boolean(entry.result) && !isModelMismatch(entry);
+  if (mode === "diff") return isModelMismatch(entry);
+  return true;
+}
+
 function renderHistory() {
   const keyword = byId("history-search").value.trim();
   const all = history();
-  const list = all.filter((entry) => historyMatches(entry, keyword));
-  byId("history-count").textContent = keyword
+  const list = all.filter((entry) => (
+    historyMatches(entry, keyword) && historyMatchesConsistency(entry, historyConsistency)
+  ));
+  byId("history-count").textContent = keyword || historyConsistency !== "all"
     ? `${list.length} / ${all.length} 条`
     : `${all.length} 条`;
 
@@ -580,13 +626,17 @@ function renderHistory() {
           <li><code>#${item.attempt} HTTP ${item.status}</code> <span>${escapeHtml(String(item.body).slice(0, 400))}</span></li>
         `).join("")
       : "";
-    // 折叠态徽章：有配置就显示配置名，否则回落显示地址（谁也不属于时至少能看出是哪家）
+    // 折叠态徽章：有配置就显示配置名，否则回落显示地址（谁也不属于时至少能看出是哪家）。
+    // 颜色按配置名/地址 hash 稳定分配，同名同色，便于在长列表里按线路做视觉分类。
+    const badgeText = entry.config || shortUrl(entry.base_url);
+    const palette = badgePaletteFor(badgeText);
+    const badgeStyle = `color:${palette.color};background:${palette.background};border-color:${palette.border};`;
     const badge = entry.config
-      ? `<span class="history-badge config">${escapeHtml(entry.config)}</span>`
-      : `<span class="history-badge url">${escapeHtml(shortUrl(entry.base_url))}</span>`;
+      ? `<span class="history-badge config" style="${badgeStyle}">${escapeHtml(entry.config)}</span>`
+      : `<span class="history-badge url" style="${badgeStyle}">${escapeHtml(shortUrl(entry.base_url))}</span>`;
     // 实测归因结果与请求时填的模型名对不上时标红。中继站常给模型起别名，
     // 所以这里的含义是"名字对不上、值得看一眼"，而不是"测错了"，因此用低饱和红。
-    const mismatch = entry.result && entry.result.prediction_name !== entry.api_model;
+    const mismatch = isModelMismatch(entry);
     const modelTitle = mismatch
       ? ` title="请求模型名 ${escapeHtml(entry.api_model)}，实测更接近 ${escapeHtml(entry.result.prediction_name)}"`
       : "";
@@ -598,6 +648,7 @@ function renderHistory() {
           <span class="history-model${mismatch ? " mismatch" : ""}"${modelTitle}>${escapeHtml(entry.api_model)}</span>
           <span class="history-outcome">${escapeHtml(prediction)}${probability} · ${entry.accepted}/${entry.attempted} 有效</span>
           ${entry.note ? `<span class="history-note">${escapeHtml(entry.note)}</span>` : ""}
+          <span class="history-duration" title="本次测试总耗时">${escapeHtml(formatDuration(entry.latency_ms))}</span>
         </summary>
         <div class="history-detail">
           <div class="history-hero">
@@ -669,6 +720,20 @@ function configChipHtml(item) {
   `;
 }
 
+// URL/Key 一旦和当前高亮配置不一致，就取消高亮：
+// 载入配置后手动改了地址或密钥，输入框里已不再是那条配置的内容，active 必须同步消失。
+function syncActiveConfig() {
+  if (!activeConfigId) return;
+  const hit = configs().find((item) => item.id === activeConfigId);
+  const changed = !hit
+    || hit.base_url !== byId("test-api-base").value
+    || hit.api_key !== byId("test-api-key").value;
+  if (changed) {
+    activeConfigId = "";
+    renderConfigList();
+  }
+}
+
 function renderConfigList() {
   const list = configs();
   byId("config-list").innerHTML = list.length
@@ -697,6 +762,7 @@ function applyConfig(id) {
   byId("test-api-base").value = hit.base_url;
   byId("test-api-key").value = hit.api_key;
   byId("config-name").value = hit.name;   // 回填名字，方便改 URL/Key 后同名覆盖
+  syncConfigNameClear();
   activeConfigId = hit.id;
   renderConfigList();
   probeModels();
@@ -827,9 +893,20 @@ byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);
 
+// 配置名清空图标：有内容才显示，点了立即清空并聚焦，方便直接输入新名字
+function syncConfigNameClear() {
+  byId("config-name-clear").hidden = !byId("config-name").value;
+}
+
 byId("config-save").addEventListener("click", saveConfig);
-byId("test-api-base").addEventListener("input", probeModels);
-byId("test-api-key").addEventListener("input", probeModels);
+byId("test-api-base").addEventListener("input", () => { probeModels(); syncActiveConfig(); });
+byId("test-api-key").addEventListener("input", () => { probeModels(); syncActiveConfig(); });
+byId("config-name").addEventListener("input", syncConfigNameClear);
+byId("config-name-clear").addEventListener("click", () => {
+  byId("config-name").value = "";
+  syncConfigNameClear();
+  byId("config-name").focus();
+});
 
 // 模型下拉：点击展开（展示完整列表）、失焦/点击外部关闭
 byId("test-api-model").addEventListener("focus", openModelMenu);
@@ -855,6 +932,18 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-combo")) closeModelMenu();
 });
 byId("history-search").addEventListener("input", renderHistory);
+// 一致性筛选：互斥的圆角矩形按钮组，点谁谁选中
+document.querySelectorAll("[data-model-consistency]").forEach((node) => {
+  node.addEventListener("click", () => {
+    historyConsistency = node.dataset.modelConsistency;
+    document.querySelectorAll("[data-model-consistency]").forEach((item) => {
+      const selected = item === node;
+      item.classList.toggle("active", selected);
+      item.setAttribute("aria-checked", String(selected));
+    });
+    renderHistory();
+  });
+});
 byId("history-clear").addEventListener("click", () => {
   if (!history().length) return;
   if (!window.confirm("确定清空全部历史记录？该操作不可撤销。")) return;
