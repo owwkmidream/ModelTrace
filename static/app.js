@@ -584,12 +584,18 @@ function renderHistory() {
     const badge = entry.config
       ? `<span class="history-badge config">${escapeHtml(entry.config)}</span>`
       : `<span class="history-badge url">${escapeHtml(shortUrl(entry.base_url))}</span>`;
+    // 实测归因结果与请求时填的模型名对不上时标红。中继站常给模型起别名，
+    // 所以这里的含义是"名字对不上、值得看一眼"，而不是"测错了"，因此用低饱和红。
+    const mismatch = entry.result && entry.result.prediction_name !== entry.api_model;
+    const modelTitle = mismatch
+      ? ` title="请求模型名 ${escapeHtml(entry.api_model)}，实测更接近 ${escapeHtml(entry.result.prediction_name)}"`
+      : "";
     return `
       <details class="history-item">
         <summary>
           <span class="history-time">${escapeHtml(formatTime(entry.at))}</span>
           ${badge}
-          <span class="history-model">${escapeHtml(entry.api_model)}</span>
+          <span class="history-model${mismatch ? " mismatch" : ""}"${modelTitle}>${escapeHtml(entry.api_model)}</span>
           <span class="history-outcome">${escapeHtml(prediction)}${probability} · ${entry.accepted}/${entry.attempted} 有效</span>
           ${entry.note ? `<span class="history-note">${escapeHtml(entry.note)}</span>` : ""}
         </summary>

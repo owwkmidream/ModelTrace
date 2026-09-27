@@ -15,6 +15,8 @@
   --warning-soft: #fff6dc;
   --danger: #b42318;
   --danger-soft: #fff0ee;
+  /* 低饱和红：用于"值得看一眼"的提示，视觉重量介于正文与报错之间 */
+  --danger-muted: #b0584f;
   --sidebar: 228px;
 }
 
@@ -288,6 +290,8 @@ tbody tr.winner { background: var(--primary-soft); }
 .history-item[open] > summary { border-bottom: 1px solid var(--line); }
 .history-time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
 .history-model { font-weight: 650; font-size: 13px; }
+/* 实测模型与请求模型名不一致：低饱和红，视觉重量贴近灰色文字，避免抢过蓝色渠道徽章 */
+.history-model.mismatch { color: var(--danger-muted); }
 .history-outcome { color: var(--muted); }
 /* 折叠摘要徽章：配置名 / 地址回落，统一蓝色系，只表达「这是哪条线路」 */
 .history-badge { border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 650; }
