@@ -771,6 +771,7 @@ function applyConfig(id) {
   // 先清空旧列表：新配置的模型要等探测返回（防抖 500ms + 网络往返），
   // 这段窗口里若沿用上一个配置的 modelOptions，展开下拉就会选到别人的模型。
   modelOptions = [];
+  modelMenuFilter = "";   // 上一个配置残留的过滤词对新列表没有意义
   if (!byId("model-menu").hidden) renderModelMenu();
   probeModels();
   setMessage(byId("config-message"), `已载入「${hit.name}」`, "success");
@@ -821,27 +822,40 @@ let modelProbeTimer = null;
 let modelProbeToken = 0;
 let modelOptions = [];
 
-// 下拉始终展示完整模型列表：输入框里的名字是请求参数，不是筛选条件。
-// 按输入过滤时，选中过一个名字后想换模型会只剩它自己一项，必须先用 × 清空才看得到别的；
-// 展示完整列表更省事，末尾的 × 只用于快速清空、方便重新选。
+// 输入时按子串过滤（打 sol 就能匹配 gpt-6-sol），但过滤是临时状态：
+// 焦点进入或点开列表时展示完整列表，选中一项后也恢复全量。
+// 这样既好找模型，又不会像早期"持续过滤"那样——选中一个名字后列表只剩它自己，
+// 想换模型必须先用 × 清空。
+let modelMenuFilter = "";
+
 function renderModelMenu() {
   const menu = byId("model-menu");
   if (!modelOptions.length) {
     menu.innerHTML = `<div class="combo-empty">暂无模型，可手动输入</div>`;
     return;
   }
-  menu.innerHTML = modelOptions.map((id) => `
+  const keyword = modelMenuFilter.trim().toLowerCase();
+  const list = keyword
+    ? modelOptions.filter((id) => id.toLowerCase().includes(keyword))
+    : modelOptions;
+  if (!list.length) {
+    menu.innerHTML = `<div class="combo-empty">无匹配模型，可手动输入</div>`;
+    return;
+  }
+  menu.innerHTML = list.map((id) => `
     <button class="combo-option${byId("test-api-model").value === id ? " active" : ""}" type="button" role="option" data-model-option="${escapeHtml(id)}">${escapeHtml(id)}</button>
   `).join("");
   document.querySelectorAll("[data-model-option]").forEach((node) => {
     node.addEventListener("click", () => {
       byId("test-api-model").value = node.dataset.modelOption;
+      modelMenuFilter = "";   // 选中后恢复全量：下次展开能看到别的模型
       closeModelMenu();
     });
   });
 }
 
-function openModelMenu() {
+function openModelMenu(filter) {
+  modelMenuFilter = typeof filter === "string" ? filter : "";
   renderModelMenu();
   byId("model-menu").hidden = false;
   byId("test-api-model").setAttribute("aria-expanded", "true");
@@ -918,9 +932,9 @@ byId("config-name-clear").addEventListener("click", () => {
   byId("config-name").focus();
 });
 
-// 模型下拉：点击展开（展示完整列表）、失焦/点击外部关闭
-byId("test-api-model").addEventListener("focus", openModelMenu);
-byId("test-api-model").addEventListener("input", openModelMenu);
+// 模型下拉：聚焦时展示完整列表，输入时按当前内容过滤；失焦/点击外部关闭
+byId("test-api-model").addEventListener("focus", () => openModelMenu());
+byId("test-api-model").addEventListener("input", () => openModelMenu(byId("test-api-model").value));
 // 一键清空模型名，方便直接重选
 byId("model-clear").addEventListener("click", () => {
   byId("test-api-model").value = "";
