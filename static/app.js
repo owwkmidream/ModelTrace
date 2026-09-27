@@ -9,6 +9,8 @@ const byId = (id) => document.getElementById(id);
 
 // ── 本地存档与历史记录（localStorage，纯前端，不上传）──
 const CONFIG_KEY = "modeltrace.configs";
+const HISTORY_KEY = "modeltrace.history";
+const HISTORY_LIMIT = 200;
 
 function readStore(key) {
   try {
@@ -23,8 +25,29 @@ function writeStore(key, value) {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
+function maskKey(key) {
+  if (!key) return "";
+  return key.length <= 12 ? key : `${key.slice(0, 6)}…${key.slice(-5)}`;
+}
+
 function configs() {
   return readStore(CONFIG_KEY);
+}
+
+// 按 base_url + api_key 匹配存档，取其名字作为历史记录的备注
+function configNameFor(baseUrl, apiKey) {
+  const hit = configs().find((item) => item.base_url === baseUrl && item.api_key === apiKey);
+  return hit ? hit.name : "";
+}
+
+function history() {
+  return readStore(HISTORY_KEY);
+}
+
+function appendHistory(entry) {
+  const list = history();
+  list.unshift(entry);
+  writeStore(HISTORY_KEY, list.slice(0, HISTORY_LIMIT));
 }
 
 function escapeHtml(value) {
@@ -93,11 +116,13 @@ function renderChallenges() {
   });
 }
 
-function renderResult(payload) {
+function renderResultHtml(payload) {
   const diagnostics = payload.diagnostics.map((item, index) => `
     <span class="diagnostic ${item.accepted ? "accepted" : "rejected"}">挑战 ${index + 1}: ${item.parsed_numbers} 个数字 · ${item.accepted ? "计入" : "忽略"}</span>
   `).join("");
-  const rows = payload.results.map((item, index) => `
+  // 只展示有概率的候选，过滤掉 0 值行以免噪音
+  const winners = payload.results.filter((item) => item.probability > 0);
+  const rows = winners.map((item, index) => `
     <tr class="${index === 0 ? "winner" : ""}">
       <td>${index + 1}</td><td><strong>${escapeHtml(item.display_name)}</strong></td><td>${escapeHtml(item.family_name)}</td>
       <td><div class="probability-cell"><span><i style="width:${item.probability * 100}%"></i></span><strong>${percent(item.probability)}</strong></div></td>
@@ -107,7 +132,8 @@ function renderResult(payload) {
   const apiNote = payload.api_test
     ? `<span>API 获得 ${payload.api_test.received}/${payload.api_test.requested} 份有效回答，实际尝试 ${payload.api_test.attempted}/${payload.api_test.max_attempts}${payload.api_test.errors.length ? `，${payload.api_test.errors.length} 次未采用` : ""}</span>`
     : "";
-  byId("result").innerHTML = `
+  const hidden = payload.results.length - winners.length;
+  return `
     <div class="result-summary">
       <div><span>最可能模型</span><strong>${escapeHtml(payload.prediction_name)}</strong></div>
       <div><span>统一库概率</span><strong>${percent(payload.probability)}</strong></div>
@@ -116,12 +142,17 @@ function renderResult(payload) {
     </div>
     <div class="diagnostics">${diagnostics}</div>
     <div class="table-wrap"><table><thead><tr><th>排序</th><th>候选模型</th><th>家族</th><th>归因概率</th><th>分布相似度</th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${hidden ? `<div class="result-note"><span>另有 ${hidden} 个候选概率为 0，已折叠</span></div>` : ""}
     ${apiNote ? `<div class="result-note">${apiNote}</div>` : ""}
     <div class="result-guidance" role="note" aria-label="结果说明">
       <p>本工具仅对指纹库内的模型进行归因；若待测模型不在指纹库中，得到任何结果都有可能。</p>
       <p>Claude Code 的系统提示词会影响模型偏好，测试结果存在较大偏差，建议不要在 Claude Code 中测试。</p>
     </div>
   `;
+}
+
+function renderResult(payload) {
+  byId("result").innerHTML = renderResultHtml(payload);
   byId("result").hidden = false;
   byId("result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
@@ -167,13 +198,15 @@ async function testViaApi(event) {
   byId("result").hidden = true;
   setMessage(byId("test-message"), "");
 
+  const startedAt = Date.now();
   const challengeResponse = await fetch("/api/challenges");
   const firstBatch = (await challengeResponse.json()).challenges;
   const retryResponse = await fetch("/api/challenges");
   const challenges = firstBatch.concat((await retryResponse.json()).challenges);
   const states = challenges.map(() => "pending");
   const outputs = [];
-  const errors = [];
+  const errors = [];        // 展示用文本
+  const failures = [];      // 结构化失败信息（status + body），写入历史
   const target = 3;
   const configuration = {
     base_url: byId("test-api-base").value,
@@ -197,7 +230,14 @@ async function testViaApi(event) {
         }),
       });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || "接口请求失败");
+      if (!response.ok) {
+        failures.push({
+          attempt: index + 1,
+          status: payload.status || response.status,
+          body: payload.body || payload.error || "",
+        });
+        throw new Error(payload.error || "接口请求失败");
+      }
       if (payload.accepted) {
         outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
         states[index] = "done";
@@ -219,6 +259,21 @@ async function testViaApi(event) {
   if (!outputs.length) {
     renderApiProgress(states, "六次尝试后仍没有可用回答");
     setMessage(byId("test-message"), `没有获得可分析输出。${errors[0] || ""}`, "error");
+    appendHistory({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(),
+      base_url: configuration.base_url,
+      api_key: configuration.api_key,
+      api_model: configuration.api_model,
+      temperature: configuration.temperature,
+      note: configNameFor(configuration.base_url, configuration.api_key),
+      accepted: 0,
+      attempted: states.filter((state) => ["done", "invalid", "error"].includes(state)).length,
+      failures,
+      latency_ms: Date.now() - startedAt,
+      result: null,
+    });
+    renderHistory();
     button.disabled = false;
     return;
   }
@@ -235,9 +290,38 @@ async function testViaApi(event) {
     result.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
     renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
     renderResult(result);
+    appendHistory({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(),
+      base_url: configuration.base_url,
+      api_key: configuration.api_key,
+      api_model: configuration.api_model,
+      temperature: configuration.temperature,
+      note: configNameFor(configuration.base_url, configuration.api_key),
+      accepted: outputs.length,
+      attempted,
+      failures,
+      latency_ms: Date.now() - startedAt,
+      result,
+    });
   } else {
     setMessage(byId("test-message"), result.error || "API 自动测试失败。", "error");
+    appendHistory({
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      at: new Date().toISOString(),
+      base_url: configuration.base_url,
+      api_key: configuration.api_key,
+      api_model: configuration.api_model,
+      temperature: configuration.temperature,
+      note: configNameFor(configuration.base_url, configuration.api_key),
+      accepted: outputs.length,
+      attempted: states.filter((state) => ["done", "invalid", "error"].includes(state)).length,
+      failures: [...failures, { attempt: 0, status: analysisResponse.status, body: result.error || "" }],
+      latency_ms: Date.now() - startedAt,
+      result: null,
+    });
   }
+  renderHistory();
   button.disabled = false;
 }
 
@@ -342,6 +426,97 @@ async function createBank(event) {
     setMessage(byId("enrollment-message"), payload.error || "创建失败。", "error");
   }
   button.disabled = false;
+}
+
+// ── 历史记录 ──
+function formatTime(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function historyMatches(entry, keyword) {
+  if (!keyword) return true;
+  const haystack = [
+    entry.note, entry.api_model, entry.base_url,
+    entry.result ? entry.result.prediction_name : "",
+  ].filter(Boolean).join(" ").toLowerCase();
+  return haystack.includes(keyword.toLowerCase());
+}
+
+function renderHistory() {
+  const keyword = byId("history-search").value.trim();
+  const all = history();
+  const list = all.filter((entry) => historyMatches(entry, keyword));
+  byId("history-count").textContent = keyword
+    ? `${list.length} / ${all.length} 条`
+    : `${all.length} 条`;
+
+  if (!list.length) {
+    byId("history-list").innerHTML = `<p class="empty-inventory">${all.length ? "没有匹配的记录" : "暂无历史记录，跑一次 API 自动测试试试"}</p>`;
+    return;
+  }
+
+  byId("history-list").innerHTML = list.map((entry) => {
+    const prediction = entry.result ? entry.result.prediction_name : "未产生结果";
+    const probability = entry.result ? ` · ${percent(entry.result.probability)}` : "";
+    const failures = entry.failures && entry.failures.length
+      ? entry.failures.map((item) => `
+          <li><code>#${item.attempt} HTTP ${item.status}</code> <span>${escapeHtml(String(item.body).slice(0, 400))}</span></li>
+        `).join("")
+      : "";
+    return `
+      <details class="history-item">
+        <summary>
+          <span class="history-time">${escapeHtml(formatTime(entry.at))}</span>
+          <span class="history-model">${escapeHtml(entry.api_model)}</span>
+          <span class="history-outcome">${escapeHtml(prediction)}${probability} · ${entry.accepted}/${entry.attempted} 有效</span>
+          ${entry.note ? `<span class="history-note">${escapeHtml(entry.note)}</span>` : ""}
+        </summary>
+        <div class="history-detail">
+          <dl class="history-meta">
+            <div><dt>地址</dt><dd>${escapeHtml(entry.base_url)}</dd></div>
+            <div><dt>密钥</dt><dd class="history-secret" data-secret="${escapeHtml(entry.api_key)}">${escapeHtml(maskKey(entry.api_key))}</dd></div>
+            <div><dt>模型名</dt><dd>${escapeHtml(entry.api_model)}</dd></div>
+            <div><dt>温度</dt><dd>${entry.temperature === null || entry.temperature === undefined ? "接口默认" : escapeHtml(String(entry.temperature))}</dd></div>
+            <div><dt>耗时</dt><dd>${(entry.latency_ms / 1000).toFixed(1)} 秒</dd></div>
+            <div><dt>备注</dt><dd><input class="history-note-input" data-note="${entry.id}" value="${escapeHtml(entry.note || "")}" placeholder="给这次记录起个名字"></dd></div>
+          </dl>
+          ${failures ? `<div class="history-failures"><strong>失败响应</strong><ul>${failures}</ul></div>` : ""}
+          <div class="history-result">${entry.result ? renderResultHtml(entry.result) : `<p class="empty-inventory">本次测试没有产生归因结果</p>`}</div>
+          <div class="action-row"><button class="button secondary" type="button" data-delete-history="${entry.id}">删除这条记录</button></div>
+        </div>
+      </details>
+    `;
+  }).join("");
+
+  // 密钥点击展开/收起
+  document.querySelectorAll(".history-secret").forEach((node) => {
+    node.addEventListener("click", () => {
+      const full = node.dataset.secret;
+      const hidden = node.textContent.includes("…");
+      node.textContent = hidden ? full : maskKey(full);
+    });
+  });
+  // 备注就地编辑
+  document.querySelectorAll("[data-note]").forEach((node) => {
+    node.addEventListener("change", () => {
+      const store = history();
+      const hit = store.find((item) => item.id === node.dataset.note);
+      if (hit) {
+        hit.note = node.value.trim();
+        writeStore(HISTORY_KEY, store);
+      }
+    });
+  });
+  // 删除单条
+  document.querySelectorAll("[data-delete-history]").forEach((node) => {
+    node.addEventListener("click", () => {
+      writeStore(HISTORY_KEY, history().filter((item) => item.id !== node.dataset.deleteHistory));
+      renderHistory();
+    });
+  });
 }
 
 // ── 配置存档（Base URL + API Key）──
@@ -531,6 +706,15 @@ byId("model-combo").addEventListener("keydown", (event) => {
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#model-combo")) closeModelMenu();
 });
+byId("history-search").addEventListener("input", renderHistory);
+byId("history-clear").addEventListener("click", () => {
+  if (!history().length) return;
+  if (!window.confirm("确定清空全部历史记录？该操作不可撤销。")) return;
+  writeStore(HISTORY_KEY, []);
+  renderHistory();
+});
+
 renderConfigList();
+renderHistory();
 renderInventory();
 loadChallenges();

@@ -239,6 +239,32 @@ tbody tr.winner { background: var(--primary-soft); }
 .config-save-row .button { white-space: nowrap; height: 38px; }
 .config-hint { margin: 0; color: var(--muted); font-size: 11px; }
 
+.history-list { display: flex; flex-direction: column; gap: 10px; }
+.history-item { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.history-item > summary {
+  display: flex; gap: 14px; align-items: baseline; flex-wrap: wrap;
+  padding: 13px 15px; cursor: pointer; font-size: 12px; list-style: none;
+}
+.history-item > summary::-webkit-details-marker { display: none; }
+.history-item > summary::before { content: "▸"; color: var(--muted); }
+.history-item[open] > summary::before { content: "▾"; }
+.history-item[open] > summary { border-bottom: 1px solid var(--line); }
+.history-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.history-model { font-weight: 600; }
+.history-outcome { color: var(--muted); }
+.history-note { color: var(--success); background: var(--success-soft); border-radius: 999px; padding: 3px 9px; font-size: 11px; }
+.history-detail { padding: 14px 15px; display: flex; flex-direction: column; gap: 14px; }
+.history-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px 18px; margin: 0; }
+.history-meta > div { display: flex; gap: 8px; align-items: baseline; }
+.history-meta dt { color: var(--muted); font-size: 11px; white-space: nowrap; min-width: 46px; }
+.history-meta dd { margin: 0; font-size: 12px; word-break: break-all; flex: 1; }
+.history-secret { cursor: pointer; font-family: ui-monospace, monospace; }
+.history-note-input { width: 100%; font-size: 12px; padding: 5px 8px; }
+.history-failures ul { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.history-failures li { font-size: 11px; color: var(--muted); word-break: break-all; }
+.history-failures code { color: var(--danger); margin-right: 6px; }
+#history-search { width: 100%; }
+
 /* ── 模型名下拉（自定义，替换无法改样式的原生 datalist） ── */
 .combo-field { position: relative; }
 .combo { position: relative; display: flex; align-items: center; }

@@ -23,6 +23,7 @@
       <nav aria-label="工作区">
         <button class="nav-button active" data-workspace="test" type="button"><span class="nav-icon">01</span><span><strong>模型测试</strong></span></button>
         <button class="nav-button" data-workspace="library" type="button"><span class="nav-icon">02</span><span><strong>指纹库管理</strong></span></button>
+        <button class="nav-button" data-workspace="history" type="button"><span class="nav-icon">03</span><span><strong>历史记录</strong></span></button>
       </nav>
     </aside>
 
@@ -118,6 +119,22 @@
         </form>
 
         <div id="enrollment-message" class="message" hidden></div>
+      </section>
+
+      <section id="workspace-history" class="workspace">
+        <div class="page-header">
+          <h1>历史记录</h1>
+          <div class="library-actions">
+            <span id="history-count" class="privacy-badge">0 条</span>
+            <button id="history-clear" class="button secondary" type="button">清空全部</button>
+          </div>
+        </div>
+
+        <div class="panel-toolbar">
+          <input id="history-search" placeholder="按备注 / 模型名 / 地址筛选" autocomplete="off">
+        </div>
+
+        <div id="history-list" class="history-list"></div>
       </section>
     </main>
   </div>
