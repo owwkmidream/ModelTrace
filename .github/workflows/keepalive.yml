@@ -1,0 +1,74 @@
+name: Keepalive
+
+# 定时任务的保活。GitHub 会停用「默认分支连续 60 天无提交」的定时工作流，
+# 本工作流按 14~28 天的随机间隔补一次提交，保证间隔始终远小于 60 天。
+on:
+  schedule:
+    - cron: '30 3 * * *'   # 每天 03:30 UTC 判断一次，与 Sync upstream 错开
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 生成保活提交
+  actions: write    # 兜底步骤需要重新启用可能被停用的定时任务
+
+concurrency:
+  group: repo-keepalive
+  cancel-in-progress: false
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # 配了 KEEPALIVE_TOKEN 就优先用它：以真人身份推送，规避 bot 提交
+          # 可能不被计入活跃度的风险；没配则退回 GITHUB_TOKEN，零配置可用。
+          token: ${{ secrets.KEEPALIVE_TOKEN || github.token }}
+
+      - name: 到点补一次提交
+        run: |
+          set -euo pipefail
+          MARKER=.github/keepalive
+
+          # 随机目标间隔 14~28 天。每天重掷一次，最坏情况第 28 天必然触发，
+          # 因此任何情况下间隔都小于 60 天阈值。
+          target=$((14 + RANDOM % 15))
+
+          if [ -f "$MARKER" ]; then
+            last=$(date -u -d "$(cat "$MARKER")" +%s)
+            days=$(( ( $(date -u +%s) - last ) / 86400 ))
+          else
+            days=$target   # 首次运行没有标记，直接建立基线
+          fi
+          echo "距上次保活提交 ${days} 天，本次目标 ${target} 天"
+
+          if [ "$days" -lt "$target" ]; then
+            echo "尚未到间隔，跳过。"
+            exit 0
+          fi
+
+          # 默认用 GitHub Actions 官方身份；如需显示为真人，可用仓库变量覆盖。
+          git config user.name  "${{ vars.KEEPALIVE_AUTHOR || 'github-actions[bot]' }}"
+          git config user.email "${{ vars.KEEPALIVE_EMAIL || '41898282+github-actions[bot]@users.noreply.github.com' }}"
+          date -u +%F > "$MARKER"
+          git add "$MARKER"
+          git commit -m "chore: keepalive $(date -u +%F)"
+          git pull --rebase --autostash origin main
+          git push origin HEAD:main
+          echo "已提交保活标记。"
+
+      - name: 兜底重新启用定时任务
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.KEEPALIVE_TOKEN || github.token }}
+        run: |
+          # 万一定时任务仍被停用，主动 enable 一次形成双保险。
+          # 失败不阻塞流程，仅提示。
+          for wf in keepalive.yml sync-upstream.yml; do
+            if gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/${wf}/enable" >/dev/null 2>&1; then
+              echo "已启用 ${wf}"
+            else
+              echo "跳过 ${wf}（可能本就启用中或权限不足）"
+            fi
+          done

@@ -3,6 +3,8 @@ name: Deploy static ModelTrace to GitHub Pages
 on:
   push:
     branches: [main]
+    # 保活标记与站点内容无关，不因此触发部署。
+    paths-ignore: ['.github/keepalive']
   workflow_dispatch:
 
 permissions:
