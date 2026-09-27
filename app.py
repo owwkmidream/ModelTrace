@@ -8,7 +8,13 @@ from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
-from enrollment import bank_summary, enroll_automatic, request_completion, test_automatic
+from enrollment import (
+    UpstreamError,
+    bank_summary,
+    enroll_automatic,
+    request_completion,
+    test_automatic,
+)
 from fingerprint import analyze_global_outputs, generate_challenges, load_bank, parse_numbers
 from bank_builder import build_bank, read_rows
 
@@ -224,6 +230,15 @@ def automatic_test_probe():
                 "accepted": parsed_numbers >= minimum_numbers,
             }
         )
+    except UpstreamError as error:
+        # 带上游状态码与响应体，前端历史记录要按 status + body 留档
+        return jsonify(
+            {
+                "error": str(error),
+                "status": error.status,
+                "body": error.body,
+            }
+        ), 502
     except Exception as error:
         return jsonify({"error": str(error)}), 502
 

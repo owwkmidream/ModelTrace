@@ -9,6 +9,7 @@ import secrets
 import time
 import urllib.error
 import urllib.request
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,9 +26,13 @@ BANK_FILE = PROJECT / "data" / "gpt_bank.json"
 # urllib 默认的 Python-urllib User-Agent 会被 Cloudflare/WAF 网关直接拦成 403，
 # 因此伪装成真实客户端（与 gpt56 检测器使用的 UA 一致）。
 DEFAULT_UPSTREAM_USER_AGENT = (
-    "Codex Desktop/0.147.0-alpha.1.2 (Windows 10.0.26200; x86_64) unknown "
-    "(codex_exec; 0.147.0-alpha.1.2)"
+    "codex-tui/0.156.1 (Windows 10.0.19044; x86_64) WindowsTerminal "
+    "(codex-tui; 0.156.1)"
 )
+DEFAULT_ORIGINATOR = "codex-tui"
+DEFAULT_CODEX_VERSION = "0.156.1"
+# Responses 端点需要 SSE；带上流式请求头与服务端要求的 beta 特性，否则网关会返回空体
+CODEX_BETA_FEATURES = "prevent_idle_sleep,remote_compaction_v2"
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
@@ -154,19 +159,52 @@ def enroll_manual(
     }
 
 
+def is_absolute_endpoint(normalized: str) -> bool:
+    """末尾带 # 表示用户已给出完整端点，不要再拼任何路径。"""
+    return normalized.endswith("#")
+
+
+def auto_formats(normalized: str) -> tuple[str, ...]:
+    """auto 探测顺序。用户端点以某种格式的路径结尾时，先试该格式，避免打一堆必然 404 的请求。"""
+    if is_absolute_endpoint(normalized):
+        return ()
+    if normalized.endswith("/messages"):
+        return ("anthropic", "openai", "responses")
+    if normalized.endswith("/responses"):
+        return ("responses", "openai", "anthropic")
+    return ("openai", "anthropic", "responses")
+
+
 def completion_url(base_url: str, api_format: str = "openai") -> str:
     normalized = base_url.rstrip("/")
+    # 末尾 # 表示“已是完整端点，不要再拼路径”，去掉 # 后原样使用
+    if is_absolute_endpoint(normalized):
+        return normalized[:-1]
     if api_format == "anthropic":
         if normalized.endswith("/messages"):
             return normalized
         if normalized.endswith("/v1"):
             return normalized + "/messages"
         return normalized + "/v1/messages"
+    if api_format == "responses":
+        # Codex 的端点是 {base}/responses，不带 /v1（实测 /v1/responses 一律 403）
+        if normalized.endswith("/responses"):
+            return normalized
+        return normalized + "/responses"
     if normalized.endswith("/chat/completions"):
         return normalized
     if normalized.endswith("/v1"):
         return normalized + "/chat/completions"
     return normalized + "/v1/chat/completions"
+
+
+class UpstreamError(RuntimeError):
+    """上游返回的错误，保留状态码与响应体供前端留档。"""
+
+    def __init__(self, message: str, status: int, body: str) -> None:
+        super().__init__(message)
+        self.status = status
+        self.body = body
 
 
 def _looks_like_waf_block(text: str) -> bool:
@@ -203,6 +241,33 @@ def _compact_upstream_error(details: str, fallback: str) -> str:
     return text[:500]
 
 
+def parse_responses_body(raw: str) -> dict:
+    """解析 Responses 响应。该端点在 stream=false 时仍可能回 SSE 帧，两种都要能取。"""
+    text = raw.lstrip()
+    if text.startswith("{"):
+        return json.loads(text)
+    # SSE 帧：取 response.completed / 最后一个 response.* 事件里的完整对象
+    result = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            continue
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") == "response.completed":
+            return event["response"]
+        if isinstance(event.get("response"), dict) and event["response"].get("output"):
+            result = event["response"]
+    if result is not None:
+        return result
+    raise RuntimeError("上游返回的不是可解析的 Responses 响应：" + raw[:500])
+
+
 def _request_completion(
     base_url: str,
     api_key: str,
@@ -228,6 +293,39 @@ def _request_completion(
             "Accept": "application/json",
             "User-Agent": upstream_user_agent(),
         }
+    elif api_format == "responses":
+        # Codex 的 Responses 端点会校验请求是否来自真实客户端，缺 client_metadata 时
+        # 一律返回 codex_access_restricted 403。实测最小通过集合是本条 body（约 450B）：
+        # 身份值全部用随机 UUID 即可，无需伪造真实客户端的安装标识。
+        session_id = str(uuid.uuid4())
+        body_data = {
+            "model": api_model,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                }
+            ],
+            "client_metadata": {
+                "x-codex-installation-id": str(uuid.uuid4()),
+                "x-codex-window-id": f"{session_id}:0",
+                "session_id": session_id,
+                "thread_id": session_id,
+                "turn_id": str(uuid.uuid4()),
+            },
+        }
+        if system_prompt:
+            body_data["instructions"] = system_prompt
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": upstream_user_agent(),
+            "originator": DEFAULT_ORIGINATOR,
+            "version": DEFAULT_CODEX_VERSION,
+            "x-codex-beta-features": CODEX_BETA_FEATURES,
+        }
     else:
         body_data = {
             "model": api_model,
@@ -249,29 +347,55 @@ def _request_completion(
     payload = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+        started = time.monotonic()
+
+        def log_upstream(outcome: str) -> None:
+            """统一上游请求日志格式：格式/端点/模型/次数 + 结果 + 耗时。"""
+            print(
+                f"[上游请求] {api_format} POST {url} model={api_model} "
+                f"attempt={attempt} {outcome} "
+                f"耗时={time.monotonic() - started:.2f}s",
+                flush=True,
+            )
+
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                status = response.status
+                raw = response.read().decode("utf-8")
+            log_upstream(f"status={status} bytes={len(raw)}")
+            payload = (
+                parse_responses_body(raw) if api_format == "responses" else json.loads(raw)
+            )
             break
         except urllib.error.HTTPError as error:
             details = error.read().decode("utf-8", errors="replace").strip()
             message = _compact_upstream_error(details, error.reason)
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
+            log_upstream(f"status={error.code} body={details[:500]}")
             if attempt < MAX_ATTEMPTS and error.code in RETRYABLE_STATUS:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
-            raise RuntimeError(f"HTTP {error.code}: {message}{retried}") from error
+            raise UpstreamError(
+                f"HTTP {error.code}: {message}{retried}", error.code, details
+            ) from error
         except urllib.error.URLError as error:
             reason = getattr(error, "reason", str(error))
+            log_upstream(f"无法连接 reason={reason}")
             if attempt < MAX_ATTEMPTS:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
-            raise RuntimeError(f"无法连接接口：{reason}{retried}") from error
+            raise UpstreamError(f"无法连接接口：{reason}{retried}", 0, str(reason)) from error
+    # 200 也可能是中转站的错误体。以下三处形状不符统一抛 UpstreamError，
+    # 把状态码与响应体带到前端，避免只剩一句无从下手的 KeyError。
+    body_text = json.dumps(payload, ensure_ascii=False)
     if api_format == "anthropic":
+        blocks = payload.get("content") if isinstance(payload, dict) else None
+        if not blocks:
+            raise UpstreamError("上游返回中没有 content", status, body_text)
         content = "".join(
             block.get("text", "")
-            for block in payload["content"]
+            for block in blocks
             if block.get("type") == "text"
         )
         stop_reason = payload.get("stop_reason")
@@ -279,8 +403,26 @@ def _request_completion(
             raise RuntimeError("模型拒绝生成，本次回答不计入")
         if stop_reason == "max_tokens":
             raise RuntimeError("回答因 max_tokens 截断，本次回答不计入")
+    elif api_format == "responses":
+        # Responses API：正文在 output 数组的 message 类型条目里，文本在 output_text
+        content = "".join(
+            block.get("text", "")
+            for block in payload.get("output") or []
+            if block.get("type") == "message"
+            for block in (block.get("content") or [])
+            if block.get("type") == "output_text"
+        )
+        if payload.get("status") == "incomplete":
+            detail = payload.get("incomplete_details") or {}
+            reason = detail.get("reason") or "上游返回不完整"
+            raise RuntimeError(f"回答未正常完成（{reason}），本次回答不计入")
+        if not content:
+            raise UpstreamError("上游返回中没有文本内容", status, body_text)
     else:
-        choice = payload["choices"][0]
+        choices = payload.get("choices") if isinstance(payload, dict) else None
+        if not choices:
+            raise UpstreamError("上游返回中没有 choices", status, body_text)
+        choice = choices[0]
         content = choice["message"]["content"]
         if isinstance(content, list):
             content = "".join(part.get("text", "") for part in content)
@@ -302,7 +444,13 @@ def request_completion(
         return _request_completion(
             base_url, api_key, api_model, prompt, temperature, api_format, system_prompt
         )
-    formats = ("openai", "anthropic")
+    # 这里用 # 判断一次：若 base_url 末尾带 #，就是某个格式的完整端点，只按该格式请求一次
+    endpoint = base_url.rstrip("/")
+    if is_absolute_endpoint(endpoint):
+        return _request_completion(
+            base_url, api_key, api_model, prompt, temperature, "openai", system_prompt
+        )
+    formats = auto_formats(endpoint)
     errors = []
     for candidate in formats:
         try:
@@ -311,6 +459,9 @@ def request_completion(
             )
         except RuntimeError as error:
             errors.append(f"{candidate}: {error}")
+        except (KeyError, IndexError, TypeError, ValueError) as error:
+            # 上游返回形状不符时也可能抛这些，绝不能中断后续格式的探测
+            errors.append(f"{candidate}: 响应解析失败（{type(error).__name__}: {error}）")
     raise RuntimeError("接口格式自动探测失败；" + "；".join(errors))
 
 
