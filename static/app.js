@@ -768,6 +768,10 @@ function applyConfig(id) {
   syncConfigNameClear();
   activeConfigId = hit.id;
   renderConfigList();
+  // 先清空旧列表：新配置的模型要等探测返回（防抖 500ms + 网络往返），
+  // 这段窗口里若沿用上一个配置的 modelOptions，展开下拉就会选到别人的模型。
+  modelOptions = [];
+  if (!byId("model-menu").hidden) renderModelMenu();
   probeModels();
   setMessage(byId("config-message"), `已载入「${hit.name}」`, "success");
 }
@@ -850,6 +854,9 @@ function closeModelMenu() {
 
 function probeModels() {
   window.clearTimeout(modelProbeTimer);
+  // 立即让在途请求失效：token 若等到 runModelProbe 才自增，切换配置后的防抖窗口内
+  // 旧配置的响应仍会通过校验并把旧模型列表写回来。
+  modelProbeToken += 1;
   modelProbeTimer = window.setTimeout(runModelProbe, 500);   // 防抖：停止输入 500ms 后才发请求
 }
 
@@ -861,7 +868,7 @@ async function runModelProbe() {
     closeModelMenu();
     return;
   }
-  const token = ++modelProbeToken;   // 防止旧请求覆盖新结果
+  const token = modelProbeToken;   // 取调度时已自增的 token，旧请求据此失效
   try {
     const query = new URLSearchParams({ base_url: baseUrl, api_key: apiKey });
     const response = await fetch(`/api/models?${query}`);
