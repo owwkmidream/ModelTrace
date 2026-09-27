@@ -30,14 +30,40 @@ function maskKey(key) {
   return key.length <= 12 ? key : `${key.slice(0, 6)}…${key.slice(-5)}`;
 }
 
+// 折叠态徽章用的短地址：去掉协议头，过长时保留域名 + 末段
+function shortUrl(url) {
+  const text = String(url || "").replace(/^https?:\/\//, "");
+  if (!text) return "未填地址";
+  if (text.length <= 46) return text;
+  const parts = text.split("/");
+  return `${parts[0]}/…/${parts[parts.length - 1]}`;
+}
+
 function configs() {
   return readStore(CONFIG_KEY);
 }
 
-// 按 base_url + api_key 匹配存档，取其名字作为历史记录的备注
+// 按 base_url + api_key 精确匹配存档，取其名字作为历史记录的「配置」徽章。
+// 精确匹配天然处理了「载入配置后改了 URL/Key」：改完就不再匹配，徽章回落为地址。
 function configNameFor(baseUrl, apiKey) {
   const hit = configs().find((item) => item.base_url === baseUrl && item.api_key === apiKey);
   return hit ? hit.name : "";
+}
+
+// 历史记录条目统一构造。config 是保存时按 URL/Key 匹配到的配置名快照，note 是用户自己写的备注。
+function historyEntry(configuration, startedAt, extra) {
+  return {
+    id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    at: new Date().toISOString(),
+    base_url: configuration.base_url,
+    api_key: configuration.api_key,
+    api_model: configuration.api_model,
+    temperature: configuration.temperature,
+    config: configNameFor(configuration.base_url, configuration.api_key),
+    note: "",
+    latency_ms: Date.now() - startedAt,
+    ...extra,
+  };
 }
 
 function history() {
@@ -59,6 +85,9 @@ function escapeHtml(value) {
 function percent(value) {
   return `${(value * 100).toFixed(1)}%`;
 }
+
+// 概率显示阈值：低于该值的候选渲染出来就是 0.0%，属于纯噪声，直接折叠
+const PROBABILITY_DISPLAY_FLOOR = 0.0005;
 
 function optionalNumber(id) {
   const value = byId(id).value.trim();
@@ -120,8 +149,10 @@ function renderResultHtml(payload) {
   const diagnostics = payload.diagnostics.map((item, index) => `
     <span class="diagnostic ${item.accepted ? "accepted" : "rejected"}">挑战 ${index + 1}: ${item.parsed_numbers} 个数字 · ${item.accepted ? "计入" : "忽略"}</span>
   `).join("");
-  // 只展示有概率的候选，过滤掉 0 值行以免噪音
-  const winners = payload.results.filter((item) => item.probability > 0);
+  // 只展示有实际概率的候选。softmax 永远输出正数（尾部分布低到 1e-12），
+  // 所以按“显示成 0.0%”的粒度截断，否则每个候选都会渲染成一行噪声。
+  const winners = payload.results.filter((item) => item.probability >= PROBABILITY_DISPLAY_FLOOR);
+  if (!winners.length) winners.push(payload.results[0]);   // 极端情况下至少保留首行
   const rows = winners.map((item, index) => `
     <tr class="${index === 0 ? "winner" : ""}">
       <td>${index + 1}</td><td><strong>${escapeHtml(item.display_name)}</strong></td><td>${escapeHtml(item.family_name)}</td>
@@ -177,6 +208,96 @@ async function analyzeManual() {
   button.disabled = false;
 }
 
+const FORMAT_LABELS = { responses: "Responses", anthropic: "Anthropic", openai: "Chat" };
+
+// ── 端点探测卡片：一行 3 张，对应探测顺序 Responses → Anthropic → Chat ──
+// 每次尝试都就地刷新对应卡片（HTTP 状态码 + body），端点结束后固定。
+// 探测成功时这些卡片没有参考价值，直接清空。
+let endpointProbes = new Map();   // api_format -> {attempt, status, body, ok, done}
+
+function resetEndpointCards() {
+  endpointProbes = new Map();
+  byId("endpoint-cards").innerHTML = "";
+  byId("endpoint-cards").hidden = true;
+}
+
+function applyProbeEvent(event) {
+  if (event.phase === "probe_start") {
+    if (!endpointProbes.has(event.api_format)) {
+      endpointProbes.set(event.api_format, { attempt: 0, status: null, body: "", ok: false, done: false, fresh: true });
+    }
+    renderEndpointCards();
+    return;
+  }
+  if (event.phase !== "attempt") return;
+  const previous = endpointProbes.get(event.api_format) || {};
+  endpointProbes.set(event.api_format, {
+    attempt: event.attempt,
+    status: event.status,
+    body: event.body || "",
+    ok: Boolean(event.ok),
+    done: Boolean(event.done),
+    fresh: false,
+  });
+  renderEndpointCards();
+}
+
+function renderEndpointCards() {
+  const container = byId("endpoint-cards");
+  if (!endpointProbes.size) {
+    container.hidden = true;
+    container.innerHTML = "";
+    return;
+  }
+  container.hidden = false;
+  container.innerHTML = [...endpointProbes.entries()].map(([apiFormat, probe]) => {
+    const state = probe.ok ? "ok" : probe.status ? "fail" : "pending";
+    const status = probe.ok ? "HTTP 200 成功" : probe.status ? `HTTP ${probe.status}` : "连接失败";
+    const attempt = probe.attempt ? `第 ${probe.attempt}/${3} 次尝试` : "准备请求";
+    const tail = probe.done ? "" : probe.attempt ? " · 等待重试" : " · 探测中";
+    const body = probe.body ? `<pre>${escapeHtml(probe.body.slice(0, 600))}</pre>` : "";
+    return `
+      <article class="endpoint-card ${state}${probe.fresh ? " fresh" : ""}">
+        <header><strong>${FORMAT_LABELS[apiFormat] || apiFormat}</strong><span>${status}</span></header>
+        <small>${attempt}${tail}</small>
+        ${body}
+      </article>
+    `;
+  }).join("");
+}
+
+// 流式读取 SSE：每个 data: 行是一条事件，边到边刷新卡片
+async function probeViaStream(configuration, challenge, onEvent, signal) {
+  const response = await fetch("/api/test/probe/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...configuration, prompt: challenge.prompt, expected_count: challenge.expected_count }),
+    signal,
+  });
+  if (!response.ok || !response.body) throw new Error(`探测接口返回 ${response.status}`);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let final = null;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // SSE 以空行分隔事件；残留不完整的一段留在 buffer 里等下一片
+    const chunks = buffer.split("\n\n");
+    buffer = chunks.pop();
+    for (const chunk of chunks) {
+      const line = chunk.split("\n").find((item) => item.startsWith("data:"));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(5).trim());
+      if (event.phase === "result") final = event;
+      else onEvent(event);
+    }
+  }
+  if (!final) throw new Error("探测流意外结束");
+  return final;
+}
+
 function renderApiProgress(states, status) {
   const valid = states.filter((state) => state === "done").length;
   const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
@@ -186,17 +307,41 @@ function renderApiProgress(states, status) {
   byId("api-progress-count").textContent = `有效 ${valid}/${target} · 已尝试 ${attempted}/${states.length}`;
   byId("api-progress-fill").style.width = `${(valid / target) * 100}%`;
   byId("api-progress-steps").innerHTML = states.map((state, index) => {
-    const labels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "接口失败", skipped: "无需调用" };
+    const labels = { pending: "等待", working: "请求中", done: "有效", invalid: "数字不足", error: "接口失败", skipped: "已停止" };
     return `<span class="progress-step ${state}"><b>${index + 1}</b>挑战 ${index + 1} · ${labels[state]}</span>`;
   }).join("");
 }
 
+// 测试运行状态：开始/停止复用同一个按钮
+let runAbort = null;
+let runActive = false;
+let runStopped = false;
+
+// 一个按钮两种身份：空闲时是「开始测试」，运行中变成「停止测试」
+function setTestRunning(running) {
+  runActive = running;
+  const button = byId("api-test-start");
+  button.textContent = running ? "停止测试" : "开始测试";
+  button.className = `button ${running ? "danger" : "primary"}`;
+  button.disabled = false;
+  if (running) byId("api-test-progress").hidden = false;
+}
+
+function stopTest() {
+  if (!runActive) return;
+  runStopped = true;
+  byId("api-test-start").disabled = true;   // 中断期间防重复点击，收尾时统一恢复
+  if (runAbort) runAbort.abort();
+}
+
 async function testViaApi(event) {
   event.preventDefault();
-  const button = event.currentTarget.querySelector("button[type=submit]");
-  button.disabled = true;
+  if (runActive) return;   // 运行中再次提交（回车等）不重入
   byId("result").hidden = true;
   setMessage(byId("test-message"), "");
+  runStopped = false;
+  runAbort = new AbortController();
+  setTestRunning(true);
 
   const startedAt = Date.now();
   const challengeResponse = await fetch("/api/challenges");
@@ -214,30 +359,26 @@ async function testViaApi(event) {
     api_model: byId("test-api-model").value,
     temperature: optionalNumber("test-temperature"),
   };
+  resetEndpointCards();
   renderApiProgress(states, "已生成独立挑战，准备调用模型");
 
   for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
+    if (runStopped) break;
     states[index] = "working";
     renderApiProgress(states, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
     try {
-      const response = await fetch("/api/test/probe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...configuration,
-          prompt: challenges[index].prompt,
-          expected_count: challenges[index].expected_count,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        failures.push({
-          attempt: index + 1,
-          status: payload.status || response.status,
-          body: payload.body || payload.error || "",
-        });
-        throw new Error(payload.error || "接口请求失败");
+      const payload = await probeViaStream(
+        configuration,
+        challenges[index],
+        applyProbeEvent,
+        runAbort.signal,
+      );
+      if (payload.error) {
+        failures.push({ attempt: index + 1, status: payload.status || 0, body: payload.body || payload.error });
+        throw new Error(payload.error);
       }
+      // 接口调用成功即说明端点已探明，错误卡片失去参考价值，无论数字是否达标都清空
+      resetEndpointCards();
       if (payload.accepted) {
         outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
         states[index] = "done";
@@ -246,35 +387,29 @@ async function testViaApi(event) {
         states[index] = "invalid";
       }
     } catch (error) {
+      if (runStopped || error.name === "AbortError") {
+        states[index] = "error";
+        break;
+      }
       errors.push(`尝试 ${index + 1}: ${error.message}`);
       states[index] = "error";
     }
     renderApiProgress(states, `当前已有 ${outputs.length}/${target} 份有效回答`);
   }
 
-  if (outputs.length === target) {
+  setTestRunning(false);
+  if (runStopped) {
+    // 软停止：前端放弃后续挑战，后端最多跑完当前这一次请求
+    states.forEach((state, stateIndex) => { if (state === "pending") states[stateIndex] = "skipped"; });
+    renderApiProgress(states, `已手动停止：${outputs.length}/${target} 份有效回答`);
+  } else if (outputs.length === target) {
     states.forEach((state, index) => { if (state === "pending") states[index] = "skipped"; });
   }
 
   if (!outputs.length) {
-    renderApiProgress(states, "六次尝试后仍没有可用回答");
-    setMessage(byId("test-message"), `没有获得可分析输出。${errors[0] || ""}`, "error");
-    appendHistory({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      at: new Date().toISOString(),
-      base_url: configuration.base_url,
-      api_key: configuration.api_key,
-      api_model: configuration.api_model,
-      temperature: configuration.temperature,
-      note: configNameFor(configuration.base_url, configuration.api_key),
-      accepted: 0,
-      attempted: states.filter((state) => ["done", "invalid", "error"].includes(state)).length,
-      failures,
-      latency_ms: Date.now() - startedAt,
-      result: null,
-    });
-    renderHistory();
-    button.disabled = false;
+    if (!runStopped) renderApiProgress(states, "六次尝试后仍没有可用回答");
+    setMessage(byId("test-message"), runStopped ? "已手动停止，没有收集到可用回答。" : `没有获得可分析输出。${errors[0] || ""}`, "error");
+    // 没有归因结果的失败测试不入历史：列表里只剩能从摘要一眼看懂的有效记录
     return;
   }
 
@@ -290,39 +425,17 @@ async function testViaApi(event) {
     result.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
     renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
     renderResult(result);
-    appendHistory({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      at: new Date().toISOString(),
-      base_url: configuration.base_url,
-      api_key: configuration.api_key,
-      api_model: configuration.api_model,
-      temperature: configuration.temperature,
-      note: configNameFor(configuration.base_url, configuration.api_key),
+    appendHistory(historyEntry(configuration, startedAt, {
       accepted: outputs.length,
       attempted,
       failures,
-      latency_ms: Date.now() - startedAt,
       result,
-    });
+    }));
   } else {
+    // 归因接口失败同样不入历史
     setMessage(byId("test-message"), result.error || "API 自动测试失败。", "error");
-    appendHistory({
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      at: new Date().toISOString(),
-      base_url: configuration.base_url,
-      api_key: configuration.api_key,
-      api_model: configuration.api_model,
-      temperature: configuration.temperature,
-      note: configNameFor(configuration.base_url, configuration.api_key),
-      accepted: outputs.length,
-      attempted: states.filter((state) => ["done", "invalid", "error"].includes(state)).length,
-      failures: [...failures, { attempt: 0, status: analysisResponse.status, body: result.error || "" }],
-      latency_ms: Date.now() - startedAt,
-      result: null,
-    });
   }
   renderHistory();
-  button.disabled = false;
 }
 
 function updateUnifiedSummary(summary) {
@@ -439,7 +552,7 @@ function formatTime(iso) {
 function historyMatches(entry, keyword) {
   if (!keyword) return true;
   const haystack = [
-    entry.note, entry.api_model, entry.base_url,
+    entry.note, entry.config, entry.api_model, entry.base_url,
     entry.result ? entry.result.prediction_name : "",
   ].filter(Boolean).join(" ").toLowerCase();
   return haystack.includes(keyword.toLowerCase());
@@ -461,28 +574,52 @@ function renderHistory() {
   byId("history-list").innerHTML = list.map((entry) => {
     const prediction = entry.result ? entry.result.prediction_name : "未产生结果";
     const probability = entry.result ? ` · ${percent(entry.result.probability)}` : "";
+    // 成功的记录也可能夹着失败尝试（前面几次报错、后几次收集够数），留档便于复盘
     const failures = entry.failures && entry.failures.length
       ? entry.failures.map((item) => `
           <li><code>#${item.attempt} HTTP ${item.status}</code> <span>${escapeHtml(String(item.body).slice(0, 400))}</span></li>
         `).join("")
       : "";
+    // 折叠态徽章：有配置就显示配置名，否则回落显示地址（谁也不属于时至少能看出是哪家）
+    const badge = entry.config
+      ? `<span class="history-badge config">${escapeHtml(entry.config)}</span>`
+      : `<span class="history-badge url">${escapeHtml(shortUrl(entry.base_url))}</span>`;
     return `
       <details class="history-item">
         <summary>
           <span class="history-time">${escapeHtml(formatTime(entry.at))}</span>
+          ${badge}
           <span class="history-model">${escapeHtml(entry.api_model)}</span>
           <span class="history-outcome">${escapeHtml(prediction)}${probability} · ${entry.accepted}/${entry.attempted} 有效</span>
           ${entry.note ? `<span class="history-note">${escapeHtml(entry.note)}</span>` : ""}
         </summary>
         <div class="history-detail">
-          <dl class="history-meta">
-            <div><dt>地址</dt><dd>${escapeHtml(entry.base_url)}</dd></div>
-            <div><dt>密钥</dt><dd class="history-secret" data-secret="${escapeHtml(entry.api_key)}">${escapeHtml(maskKey(entry.api_key))}</dd></div>
-            <div><dt>模型名</dt><dd>${escapeHtml(entry.api_model)}</dd></div>
-            <div><dt>温度</dt><dd>${entry.temperature === null || entry.temperature === undefined ? "接口默认" : escapeHtml(String(entry.temperature))}</dd></div>
-            <div><dt>耗时</dt><dd>${(entry.latency_ms / 1000).toFixed(1)} 秒</dd></div>
-            <div><dt>备注</dt><dd><input class="history-note-input" data-note="${entry.id}" value="${escapeHtml(entry.note || "")}" placeholder="给这次记录起个名字"></dd></div>
-          </dl>
+          <div class="history-hero">
+            <div class="history-hero-main">
+              <span class="history-hero-label">模型名</span>
+              <strong class="history-hero-value">${escapeHtml(entry.api_model)}</strong>
+            </div>
+            <div class="history-hero-main">
+              <span class="history-hero-label">地址</span>
+              <strong class="history-hero-value mono">${escapeHtml(entry.base_url)}</strong>
+            </div>
+            <div class="history-hero-side">
+              <span class="history-hero-label">密钥</span>
+              <span class="history-secret mono" data-secret="${escapeHtml(entry.api_key)}" title="点击展开/收起">${escapeHtml(maskKey(entry.api_key))}</span>
+            </div>
+            <div class="history-hero-side">
+              <span class="history-hero-label">温度</span>
+              <span>${entry.temperature === null || entry.temperature === undefined ? "接口默认" : escapeHtml(String(entry.temperature))}</span>
+            </div>
+            <div class="history-hero-side">
+              <span class="history-hero-label">耗时</span>
+              <span>${(entry.latency_ms / 1000).toFixed(1)} 秒</span>
+            </div>
+          </div>
+          <label class="history-note-field">
+            <span>备注</span>
+            <input class="history-note-input" data-note="${entry.id}" value="${escapeHtml(entry.note || "")}" placeholder="给这次记录起个名字，方便回头找">
+          </label>
           ${failures ? `<div class="history-failures"><strong>失败响应</strong><ul>${failures}</ul></div>` : ""}
           <div class="history-result">${entry.result ? renderResultHtml(entry.result) : `<p class="empty-inventory">本次测试没有产生归因结果</p>`}</div>
           <div class="action-row"><button class="button secondary" type="button" data-delete-history="${entry.id}">删除这条记录</button></div>
@@ -507,6 +644,7 @@ function renderHistory() {
       if (hit) {
         hit.note = node.value.trim();
         writeStore(HISTORY_KEY, store);
+        renderHistory();   // 折叠态也要显示备注徽章，改完立即重渲染
       }
     });
   });
@@ -614,18 +752,17 @@ let modelProbeTimer = null;
 let modelProbeToken = 0;
 let modelOptions = [];
 
-function renderModelMenu(filter) {
+// 下拉始终展示完整模型列表：输入框里的名字是请求参数，不是筛选条件。
+// 按输入过滤时，选中过一个名字后想换模型会只剩它自己一项，必须先用 × 清空才看得到别的；
+// 展示完整列表更省事，末尾的 × 只用于快速清空、方便重新选。
+function renderModelMenu() {
   const menu = byId("model-menu");
-  const keyword = (filter || "").trim().toLowerCase();
-  const list = keyword
-    ? modelOptions.filter((id) => id.toLowerCase().includes(keyword))
-    : modelOptions;
-  if (!list.length) {
-    menu.innerHTML = `<div class="combo-empty">${modelOptions.length ? "没有匹配的模型" : "暂无模型，可手动输入"}</div>`;
+  if (!modelOptions.length) {
+    menu.innerHTML = `<div class="combo-empty">暂无模型，可手动输入</div>`;
     return;
   }
-  menu.innerHTML = list.map((id) => `
-    <button class="combo-option" type="button" role="option" data-model-option="${escapeHtml(id)}">${escapeHtml(id)}</button>
+  menu.innerHTML = modelOptions.map((id) => `
+    <button class="combo-option${byId("test-api-model").value === id ? " active" : ""}" type="button" role="option" data-model-option="${escapeHtml(id)}">${escapeHtml(id)}</button>
   `).join("");
   document.querySelectorAll("[data-model-option]").forEach((node) => {
     node.addEventListener("click", () => {
@@ -636,7 +773,7 @@ function renderModelMenu(filter) {
 }
 
 function openModelMenu() {
-  renderModelMenu(byId("test-api-model").value);
+  renderModelMenu();
   byId("model-menu").hidden = false;
   byId("test-api-model").setAttribute("aria-expanded", "true");
 }
@@ -673,6 +810,9 @@ async function runModelProbe() {
     modelOptions = [];
     setMessage(byId("model-probe-message"), `模型探测失败：${error.message}`, "working");
   }
+  // 焦点仍在输入框里时不会再触发 focus 事件，下拉已展开就必须就地刷新，
+  // 否则探测前显示的“暂无模型”会一直留着，要手动失焦再聚焦才更新。
+  if (!byId("model-menu").hidden) renderModelMenu();
 }
 
 document.querySelectorAll("[data-workspace]").forEach((button) => button.addEventListener("click", () => activateWorkspace(button.dataset.workspace)));
@@ -681,6 +821,12 @@ byId("bank-select").addEventListener("change", (event) => selectBank(event.targe
 byId("regenerate").addEventListener("click", loadChallenges);
 byId("analyze").addEventListener("click", analyzeManual);
 byId("api-test-form").addEventListener("submit", testViaApi);
+// 开始/停止共用同一个按钮：运行中点击即中断当前请求并放弃后续挑战（软停止）
+byId("api-test-start").addEventListener("click", (event) => {
+  if (!runActive) return;   // 空闲时交给表单 submit，避免重复触发
+  event.preventDefault();
+  stopTest();
+});
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);
@@ -689,9 +835,15 @@ byId("config-save").addEventListener("click", saveConfig);
 byId("test-api-base").addEventListener("input", probeModels);
 byId("test-api-key").addEventListener("input", probeModels);
 
-// 模型下拉：点击展开、输入过滤、失焦/点击外部关闭
+// 模型下拉：点击展开（展示完整列表）、失焦/点击外部关闭
 byId("test-api-model").addEventListener("focus", openModelMenu);
 byId("test-api-model").addEventListener("input", openModelMenu);
+// 一键清空模型名，方便直接重选
+byId("model-clear").addEventListener("click", () => {
+  byId("test-api-model").value = "";
+  byId("test-api-model").focus();
+  openModelMenu();
+});
 byId("model-combo-toggle").addEventListener("click", () => {
   if (byId("model-menu").hidden) {
     byId("test-api-model").focus();

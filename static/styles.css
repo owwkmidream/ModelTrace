@@ -73,6 +73,8 @@ button:disabled { cursor: wait; opacity: .6; }
 .button.primary:hover { background: var(--primary-dark); }
 .button.secondary { color: var(--text); background: white; border: 1px solid var(--line-strong); }
 .button.secondary:hover { background: var(--surface-soft); }
+.button.danger { color: white; background: var(--danger); border: 1px solid var(--danger); }
+.button.danger:hover { background: #8f1a12; }
 
 .challenge-list { display: grid; border: 1px solid var(--line); border-top: 0; background: var(--surface); }
 .challenge-item + .challenge-item { border-top: 1px solid var(--line); }
@@ -121,6 +123,41 @@ label code { color: var(--primary-dark); }
 .progress-step.error { color: var(--danger); border-color: #f3c7c2; background: var(--danger-soft); }
 .progress-step.error b { color: white; background: var(--danger); }
 .progress-step.skipped { opacity: .55; }
+
+/* ── 端点探测卡片：一行 3 张，对应 Responses / Anthropic / Chat，含状态码与响应体 ── */
+.endpoint-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 12px; }
+.endpoint-card {
+  min-width: 0; padding: 10px 12px 11px 14px; border: 1px solid var(--line);
+  border-left: 3px solid var(--line-strong); border-radius: 8px;
+  background: var(--surface); display: flex; flex-direction: column; gap: 6px;
+}
+/* 新端点卡片带动画弹出；同一端点重试刷新内容时不重放动画 */
+.endpoint-card.fresh { animation: endpoint-pop .26s ease-out; }
+@keyframes endpoint-pop {
+  from { opacity: 0; transform: translateY(6px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+.endpoint-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.endpoint-card header strong { font-size: 12px; }
+.endpoint-card header span { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.endpoint-card small { color: var(--muted); font-size: 11px; }
+.endpoint-card pre {
+  margin: 0; min-height: 0; max-height: 132px; overflow: auto; padding: 8px 9px; border-radius: 6px;
+  background: var(--surface-soft); border: 1px solid var(--line); color: #475467;
+  font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+}
+/* 失败态整卡染红，响应体的红再深一档，和卡片底色分层 */
+.endpoint-card.fail { background: var(--danger-soft); border-color: #f3c7c2; border-left-color: var(--danger); }
+.endpoint-card.fail header span { color: var(--danger); }
+.endpoint-card.fail small { color: #94564e; }
+.endpoint-card.fail pre { background: #ffdfda; border-color: #f0bdb6; color: #7a1a12; }
+.endpoint-card.ok { background: var(--success-soft); border-color: #c8ead7; border-left-color: var(--success); }
+.endpoint-card.ok header span { color: var(--success); }
+.endpoint-card.ok pre { background: #d9efe2; border-color: #c0e3d0; color: #145c39; }
+.endpoint-card.pending { background: #eef4ff; border-color: #a9c4f5; border-left-color: #84adff; }
+.endpoint-card.pending header span { color: #1d4ed8; }
+.endpoint-card.pending pre { background: #dfeaff; border-color: #a9c4f5; color: #1e3a8a; }
+@media (max-width: 720px) { .endpoint-cards { grid-template-columns: 1fr; } }
 
 .message { margin-top: 14px; padding: 11px 13px; border: 1px solid; border-radius: 7px; font-size: 12px; }
 .message.error { color: var(--danger); background: var(--danger-soft); border-color: #f3c7c2; }
@@ -249,17 +286,33 @@ tbody tr.winner { background: var(--primary-soft); }
 .history-item > summary::before { content: "▸"; color: var(--muted); }
 .history-item[open] > summary::before { content: "▾"; }
 .history-item[open] > summary { border-bottom: 1px solid var(--line); }
-.history-time { color: var(--muted); font-variant-numeric: tabular-nums; }
-.history-model { font-weight: 600; }
+.history-time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+.history-model { font-weight: 650; font-size: 13px; }
 .history-outcome { color: var(--muted); }
-.history-note { color: var(--success); background: var(--success-soft); border-radius: 999px; padding: 3px 9px; font-size: 11px; }
+/* 折叠摘要徽章：配置名 / 地址回落，统一蓝色系，只表达「这是哪条线路」 */
+.history-badge { border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 650; }
+.history-badge.config, .history-badge.url { color: var(--primary-dark); background: var(--primary-soft); border: 1px solid #c9dcff; }
+.history-badge.url { font-family: ui-monospace, monospace; font-weight: 500; }
+/* 备注徽章是用户自己的标注，与线路区分的蓝色分开，用暖色 */
+.history-note { color: var(--warning); background: var(--warning-soft); border: 1px solid #eedca6; border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 650; }
+
 .history-detail { padding: 14px 15px; display: flex; flex-direction: column; gap: 14px; }
-.history-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 9px 18px; margin: 0; }
-.history-meta > div { display: flex; gap: 8px; align-items: baseline; }
-.history-meta dt { color: var(--muted); font-size: 11px; white-space: nowrap; min-width: 46px; }
-.history-meta dd { margin: 0; font-size: 12px; word-break: break-all; flex: 1; }
+/* 元数据分层：模型名与地址占主列加大，密钥/温度/耗时降为次要小字 */
+.history-hero {
+  display: grid; grid-template-columns: 2fr 1fr; gap: 12px 18px;
+  padding: 13px 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-soft);
+}
+.history-hero-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.history-hero-side { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.history-hero-label { color: var(--muted); font-size: 10px; letter-spacing: .04em; }
+.history-hero-value { font-size: 14px; word-break: break-all; }
+.history-hero-value.mono { font-family: ui-monospace, monospace; font-size: 12.5px; font-weight: 600; }
+.history-hero-side > span:last-child, .history-hero-side .history-secret { font-size: 11.5px; color: var(--muted); word-break: break-all; }
 .history-secret { cursor: pointer; font-family: ui-monospace, monospace; }
-.history-note-input { width: 100%; font-size: 12px; padding: 5px 8px; }
+/* 备注独立成块并加大：这是用户最常回看、也最常编辑的字段 */
+.history-note-field { display: flex; align-items: center; gap: 10px; padding: 11px 13px; border: 1px solid #c9dcff; border-radius: 8px; background: var(--primary-soft); }
+.history-note-field > span { color: var(--primary-dark); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.history-note-input { flex: 1; min-width: 0; height: 34px; font-size: 13px; font-weight: 600; background: white; }
 .history-failures ul { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
 .history-failures li { font-size: 11px; color: var(--muted); word-break: break-all; }
 .history-failures code { color: var(--danger); margin-right: 6px; }
@@ -268,13 +321,21 @@ tbody tr.winner { background: var(--primary-soft); }
 /* ── 模型名下拉（自定义，替换无法改样式的原生 datalist） ── */
 .combo-field { position: relative; }
 .combo { position: relative; display: flex; align-items: center; }
-.combo input { padding-right: 34px; }
+.combo input { padding-right: 60px; }
 .combo-toggle {
   position: absolute; right: 1px; top: 1px; bottom: 1px; width: 32px;
   border: 0; background: transparent; color: var(--muted); font-size: 10px;
   cursor: pointer; border-radius: 0 6px 6px 0;
 }
 .combo-toggle:hover { color: var(--primary-dark); }
+/* 清空按钮：贴在输入框末尾、下拉箭头左侧，点击即清空模型名以便重选 */
+.combo-clear {
+  position: absolute; right: 32px; top: 50%; transform: translateY(-50%);
+  width: 22px; height: 22px; display: flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 50%; background: transparent; color: var(--muted);
+  font-size: 15px; line-height: 1; cursor: pointer;
+}
+.combo-clear:hover { background: var(--primary-soft); color: var(--primary-dark); }
 .combo-menu {
   position: absolute; z-index: 30; top: calc(100% + 4px); left: 0; right: 0;
   max-height: 232px; overflow-y: auto; padding: 5px;
@@ -288,4 +349,5 @@ tbody tr.winner { background: var(--primary-soft); }
   cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .combo-option:hover, .combo-option:focus-visible { background: var(--primary-soft); color: var(--primary-dark); outline: none; }
+.combo-option.active { background: var(--primary-soft); color: var(--primary-dark); font-weight: 600; }
 .combo-empty { padding: 9px 10px; color: var(--muted); font-size: 12px; }

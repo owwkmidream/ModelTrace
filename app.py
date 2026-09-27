@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 import re
 import secrets
+import threading
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 from enrollment import (
     UpstreamError,
     bank_summary,
+    cached_format,
     enroll_automatic,
     list_models,
     request_completion,
@@ -208,40 +211,63 @@ def automatic_test():
         return jsonify({"error": str(error)}), 400
 
 
-@app.post("/api/test/probe")
-def automatic_test_probe():
+@app.post("/api/test/probe/stream")
+def automatic_test_probe_stream():
+    """探测过程中的 SSE 流：每试一次推一条事件，前端据此实时刷新端点卡片。
+
+    单次耗时可能很长（每次尝试上限 240s），所以把 request_completion 放进线程跑，
+    事件经队列回流到生成器；前端 abort 时生成器退出，后端最多跑完当前这一次请求。
+    """
     payload = request.get_json()
-    try:
-        text = request_completion(
-            base_url=payload["base_url"].strip(),
-            api_key=payload["api_key"],
-            api_model=payload["api_model"].strip(),
-            prompt=payload["prompt"],
-            temperature=requested_temperature(payload),
-            api_format="auto",
-        )
-        expected_count = int(payload["expected_count"])
-        parsed_numbers = len(parse_numbers(text))
-        minimum_numbers = max(80, math.ceil(expected_count * 0.55))
-        return jsonify(
-            {
-                "text": text,
-                "parsed_numbers": parsed_numbers,
-                "minimum_numbers": minimum_numbers,
-                "accepted": parsed_numbers >= minimum_numbers,
-            }
-        )
-    except UpstreamError as error:
-        # 带上游状态码与响应体，前端历史记录要按 status + body 留档
-        return jsonify(
-            {
-                "error": str(error),
-                "status": error.status,
-                "body": error.body,
-            }
-        ), 502
-    except Exception as error:
-        return jsonify({"error": str(error)}), 502
+    base_url = payload["base_url"].strip()
+    api_key = payload["api_key"]
+    events: queue.Queue = queue.Queue()
+
+    def work() -> None:
+        try:
+            text = request_completion(
+                base_url=base_url,
+                api_key=api_key,
+                api_model=payload["api_model"].strip(),
+                prompt=payload["prompt"],
+                temperature=requested_temperature(payload),
+                api_format="auto",
+                on_event=events.put,
+            )
+            expected_count = int(payload["expected_count"])
+            parsed_numbers = len(parse_numbers(text))
+            minimum_numbers = max(80, math.ceil(expected_count * 0.55))
+            events.put(
+                {
+                    "phase": "result",
+                    "text": text,
+                    "parsed_numbers": parsed_numbers,
+                    "minimum_numbers": minimum_numbers,
+                    "accepted": parsed_numbers >= minimum_numbers,
+                    "api_format": cached_format(base_url, api_key),
+                }
+            )
+        except UpstreamError as error:
+            events.put({"phase": "result", "error": str(error), "status": error.status, "body": error.body})
+        except Exception as error:   # 形状不符等情况也要让前端拿到结论，而不是流静默断掉
+            events.put({"phase": "result", "error": str(error)})
+        finally:
+            events.put(None)   # 哨兵：结束流
+
+    threading.Thread(target=work, daemon=True).start()
+
+    def generate():
+        while True:
+            event = events.get()
+            if event is None:
+                break
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/models")

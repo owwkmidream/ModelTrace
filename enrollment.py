@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -36,6 +37,10 @@ CODEX_BETA_FEATURES = "prevent_idle_sleep,remote_compaction_v2"
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
+
+# 端点格式探测结果缓存：(base_url, api_key 摘要) -> "responses" | "anthropic" | "openai"。
+# 没有它时，前端每轮测试的每个挑战都会把三种格式重新探一遍，一次测试最多打 18 次上游请求。
+FORMAT_CACHE: dict[tuple[str, str], str] = {}
 
 
 def upstream_user_agent() -> str:
@@ -165,14 +170,15 @@ def is_absolute_endpoint(normalized: str) -> bool:
 
 
 def auto_formats(normalized: str) -> tuple[str, ...]:
-    """auto 探测顺序。用户端点以某种格式的路径结尾时，先试该格式，避免打一堆必然 404 的请求。"""
+    """auto 探测顺序：Responses > Anthropic > Chat。
+    用户端点以某种格式的路径结尾时，先试该格式，避免打一堆必然 404 的请求。"""
     if is_absolute_endpoint(normalized):
         return ()
     if normalized.endswith("/messages"):
-        return ("anthropic", "openai", "responses")
+        return ("anthropic", "responses", "openai")
     if normalized.endswith("/responses"):
-        return ("responses", "openai", "anthropic")
-    return ("openai", "anthropic", "responses")
+        return ("responses", "anthropic", "openai")
+    return ("responses", "anthropic", "openai")
 
 
 def completion_url(base_url: str, api_format: str = "openai") -> str:
@@ -309,6 +315,12 @@ def parse_responses_body(raw: str) -> dict:
     raise RuntimeError("上游返回的不是可解析的 Responses 响应：" + raw[:500])
 
 
+def _emit(on_event, **event) -> None:
+    """把探测进度推给订阅者（前端 SSE 端点卡片）；没有订阅者时是空操作。"""
+    if on_event:
+        on_event(event)
+
+
 def _request_completion(
     base_url: str,
     api_key: str,
@@ -317,6 +329,7 @@ def _request_completion(
     temperature: float | None,
     api_format: str,
     system_prompt: str = "",
+    on_event=None,
 ) -> str:
     if api_format == "anthropic":
         body_data = {
@@ -404,6 +417,8 @@ def _request_completion(
                 status = response.status
                 raw = response.read().decode("utf-8")
             log_upstream(f"status={status} bytes={len(raw)}")
+            _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
+                  status=status, body="", ok=True)
             payload = (
                 parse_responses_body(raw) if api_format == "responses" else json.loads(raw)
             )
@@ -413,7 +428,11 @@ def _request_completion(
             message = _compact_upstream_error(details, error.reason)
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
             log_upstream(f"status={error.code} body={details[:500]}")
-            if attempt < MAX_ATTEMPTS and error.code in RETRYABLE_STATUS:
+            will_retry = attempt < MAX_ATTEMPTS and error.code in RETRYABLE_STATUS
+            # 每次尝试都推一条，前端据此就地刷新该端点的卡片
+            _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
+                  status=error.code, body=details, ok=False, done=not will_retry)
+            if will_retry:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
             raise UpstreamError(
@@ -422,7 +441,10 @@ def _request_completion(
         except urllib.error.URLError as error:
             reason = getattr(error, "reason", str(error))
             log_upstream(f"无法连接 reason={reason}")
-            if attempt < MAX_ATTEMPTS:
+            will_retry = attempt < MAX_ATTEMPTS
+            _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
+                  status=0, body=str(reason), ok=False, done=not will_retry)
+            if will_retry:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
@@ -472,6 +494,16 @@ def _request_completion(
     return str(content)
 
 
+def detection_cache_key(base_url: str, api_key: str) -> tuple[str, str]:
+    """探测结果的缓存键。api_key 用摘要而非明文，避免在常驻进程里长期留存原始密钥。"""
+    return base_url.rstrip("/"), hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def cached_format(base_url: str, api_key: str) -> str | None:
+    """返回已探测成功并缓存的接口格式；未探测过时为 None。"""
+    return FORMAT_CACHE.get(detection_cache_key(base_url, api_key))
+
+
 def request_completion(
     base_url: str,
     api_key: str,
@@ -480,29 +512,43 @@ def request_completion(
     temperature: float | None,
     api_format: str = "auto",
     system_prompt: str = "",
+    on_event=None,
 ) -> str:
     if api_format != "auto":
         return _request_completion(
-            base_url, api_key, api_model, prompt, temperature, api_format, system_prompt
+            base_url, api_key, api_model, prompt, temperature, api_format, system_prompt, on_event
         )
     # 这里用 # 判断一次：若 base_url 末尾带 #，就是某个格式的完整端点，只按该格式请求一次
     endpoint = base_url.rstrip("/")
     if is_absolute_endpoint(endpoint):
         return _request_completion(
-            base_url, api_key, api_model, prompt, temperature, "openai", system_prompt
+            base_url, api_key, api_model, prompt, temperature, "openai", system_prompt, on_event
         )
+    # 端点类型只探测一次：命中缓存就直连，命中后失败才失效重探（上游可能换了协议）
+    key = detection_cache_key(base_url, api_key)
     formats = auto_formats(endpoint)
+    known = FORMAT_CACHE.get(key)
+    if known:
+        formats = (known, *(candidate for candidate in formats if candidate != known))
     errors = []
     for candidate in formats:
+        _emit(on_event, phase="probe_start", api_format=candidate)
         try:
-            return _request_completion(
-                base_url, api_key, api_model, prompt, temperature, candidate, system_prompt
+            text = _request_completion(
+                base_url, api_key, api_model, prompt, temperature, candidate, system_prompt, on_event
             )
         except RuntimeError as error:
             errors.append(f"{candidate}: {error}")
+            _emit(on_event, phase="probe_end", api_format=candidate, ok=False)
         except (KeyError, IndexError, TypeError, ValueError) as error:
             # 上游返回形状不符时也可能抛这些，绝不能中断后续格式的探测
             errors.append(f"{candidate}: 响应解析失败（{type(error).__name__}: {error}）")
+            _emit(on_event, phase="probe_end", api_format=candidate, ok=False)
+        else:
+            FORMAT_CACHE[key] = candidate
+            _emit(on_event, phase="probe_end", api_format=candidate, ok=True)
+            return text
+    FORMAT_CACHE.pop(key, None)
     raise RuntimeError("接口格式自动探测失败；" + "；".join(errors))
 
 
