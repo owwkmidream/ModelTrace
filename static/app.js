@@ -224,7 +224,7 @@ function resetEndpointCards() {
 function applyProbeEvent(event) {
   if (event.phase === "probe_start") {
     if (!endpointProbes.has(event.api_format)) {
-      endpointProbes.set(event.api_format, { attempt: 0, status: null, body: "", ok: false, done: false, fresh: true });
+      endpointProbes.set(event.api_format, { attempt: 0, status: null, body: "", ok: false, done: false, fresh: true, stream: false });
     }
     renderEndpointCards();
     return;
@@ -238,6 +238,7 @@ function applyProbeEvent(event) {
     ok: Boolean(event.ok),
     done: Boolean(event.done),
     fresh: false,
+    stream: Boolean(event.stream),
   });
   renderEndpointCards();
 }
@@ -254,12 +255,14 @@ function renderEndpointCards() {
     const state = probe.ok ? "ok" : probe.status ? "fail" : "pending";
     const status = probe.ok ? "HTTP 200 成功" : probe.status ? `HTTP ${probe.status}` : "连接失败";
     const attempt = probe.attempt ? `第 ${probe.attempt}/${3} 次尝试` : "准备请求";
+    // 升级为流式后标一下，便于分辨"这次换的是请求形态"而不是普通重试
+    const streamTag = probe.stream ? " · 流式" : "";
     const tail = probe.done ? "" : probe.attempt ? " · 等待重试" : " · 探测中";
     const body = probe.body ? `<pre>${escapeHtml(probe.body.slice(0, 600))}</pre>` : "";
     return `
       <article class="endpoint-card ${state}${probe.fresh ? " fresh" : ""}">
         <header><strong>${FORMAT_LABELS[apiFormat] || apiFormat}</strong><span>${status}</span></header>
-        <small>${attempt}${tail}</small>
+        <small>${attempt}${streamTag}${tail}</small>
         ${body}
       </article>
     `;

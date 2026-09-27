@@ -248,6 +248,128 @@ test("Responses 端点的 SSE 帧也能解析出正文", async () => {
   }
 });
 
+test("400 拒绝非流式时升级为流式重试并成功", async () => {
+  // 站点强制流式：非流式一律 400，带上 stream 才回 SSE
+  const upstream = withUpstream((url, init) => {
+    const body = JSON.parse(init.body);
+    if (!body.stream) {
+      return new Response(
+        '{"error":{"message":"This station only supports streaming generation. Set stream=true."}}',
+        { status: 400 },
+      );
+    }
+    return sseResponse([
+      { choices: [{ delta: { content: "7 8 9" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ]);
+  });
+  try {
+    const response = await worker.fetch(probeRequest({ preferred_format: "openai" }), {});
+    const events = await readEvents(response);
+    const result = events.find((event) => event.phase === "result");
+    assert.equal(result.text, "7 8 9", "升级为流式后应成功取到正文");
+    assert.equal(result.api_format, "openai");
+
+    const attempts = events.filter(
+      (event) => event.phase === "attempt" && event.api_format === "openai",
+    );
+    assert.equal(attempts.length, 2, "400 应触发一次升级重试");
+    assert.equal(attempts[0].stream, false, "第一次是非流式");
+    assert.equal(attempts[0].status, 400);
+    assert.equal(attempts[0].done, false, "400 升级中，不应标记终结");
+    assert.equal(attempts[1].stream, true, "第二次必须带 stream");
+    assert.equal(attempts[1].status, 200);
+    assert.equal(attempts[0].body.includes("stream=true"), true, "保留响应体供前端留档");
+
+    const bodies = upstream.calls.map((call) => JSON.parse(call.init.body));
+    assert.equal(bodies[0].stream, false);
+    assert.equal(bodies[1].stream, true);
+  } finally {
+    upstream.restore();
+  }
+});
+
+test("200 但空体（无 400 可识别）同样升级为流式", async () => {
+  const upstream = withUpstream((url, init) => {
+    const body = JSON.parse(init.body);
+    if (!body.stream) return new Response("", { status: 200 });
+    return sseResponse([
+      { choices: [{ delta: { content: "1 2 3" } }] },
+      { choices: [{ delta: {}, finish_reason: "stop" }] },
+    ]);
+  });
+  try {
+    const response = await worker.fetch(probeRequest({ preferred_format: "openai" }), {});
+    const events = await readEvents(response);
+    const result = events.find((event) => event.phase === "result");
+    assert.equal(result.text, "1 2 3", "空体回落也应被识别并升级");
+    const attempts = events.filter(
+      (event) => event.phase === "attempt" && event.api_format === "openai",
+    );
+    assert.equal(attempts.length, 2);
+    assert.equal(attempts[0].ok, false, "200 但空体不得上报为成功");
+    assert.equal(attempts[1].stream, true);
+  } finally {
+    upstream.restore();
+  }
+});
+
+test("流式增量帧按 delta 拼接，finish_reason=length 仍被拒收", async () => {
+  // 分段返回，验证多个 delta 帧会被拼成完整正文
+  const upstream = withUpstream(() => sseResponse([
+    { choices: [{ delta: { content: "10 " } }] },
+    { choices: [{ delta: { content: "20 " } }] },
+    { choices: [{ delta: { content: "30" } }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
+  ]));
+  try {
+    const response = await worker.fetch(probeRequest({ preferred_format: "openai" }), {});
+    const events = await readEvents(response);
+    const result = events.find((event) => event.phase === "result");
+    assert.equal(result.text, "10 20 30");
+  } finally {
+    upstream.restore();
+  }
+});
+
+test("Anthropic 流式 message_delta 的 max_tokens 会拒收该格式", async () => {
+  const upstream = withUpstream((url) => {
+    if (url.includes("/messages")) {
+      return sseResponse([
+        { type: "content_block_delta", delta: { type: "text_delta", text: "1 2" } },
+        { type: "message_delta", delta: { stop_reason: "max_tokens" } },
+      ]);
+    }
+    return new Response("nope", { status: 404 });
+  });
+  try {
+    const response = await worker.fetch(probeRequest(), {});
+    const events = await readEvents(response);
+    const result = events.find((event) => event.phase === "result");
+    // 截断的 anthropic 被跳过，最终全部失败并带逐格式原因
+    assert.equal(result.text, undefined);
+    assert.ok(result.error.includes("接口格式自动探测失败"));
+    assert.ok(result.error.includes("max_tokens"), "截断原因应保留在错误里");
+  } finally {
+    upstream.restore();
+  }
+});
+
+test("流内 error 事件被识别为失败，不会退化成空正文", async () => {
+  const upstream = withUpstream(() => sseResponse([
+    { type: "error", error: { type: "overloaded_error", message: "upstream overloaded" } },
+  ]));
+  try {
+    const response = await worker.fetch(probeRequest({ preferred_format: "openai" }), {});
+    const events = await readEvents(response);
+    const result = events.find((event) => event.phase === "result");
+    assert.ok(result.error.includes("流中返回错误"), `应报流内错误，实际：${result.error}`);
+    assert.ok(result.error.includes("upstream overloaded"));
+  } finally {
+    upstream.restore();
+  }
+});
+
 test("回答被截断时不计入，并继续尝试下一种格式", async () => {
   const upstream = withUpstream((url) => {
     if (url.includes("/responses")) {

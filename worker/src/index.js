@@ -19,6 +19,9 @@ const CODEX_BETA_FEATURES = "prevent_idle_sleep,remote_compaction_v2";
 
 // 只有这些状态码值得重试；404/403 一类确定性错误立刻换下一种格式
 const RETRYABLE_STATUS = new Set([408, 429, 500, 502, 503, 504]);
+// 400/422 属于"参数被拒"：中转站拒绝非流式请求时就用这两个码，因此升级为流式再试一次。
+// 判定只看状态码，不匹配第三方网关的具体文案（措辞不可穷举，且"200 + 空体"根本无码可认）。
+const STREAM_REQUIRED_STATUS = new Set([400, 422]);
 const MAX_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 
@@ -129,13 +132,11 @@ function buildRequest(apiFormat, apiModel, prompt, temperature, systemPrompt) {
   return { body, headers: {} };
 }
 
-// ── 响应体解析：Responses 端点即使 stream=false 也可能回 SSE 帧 ──
+// ── 响应体解析：非流式可能回整包 JSON，流式回 SSE 帧，两种都要能取 ──
 
-function parseResponsesBody(raw) {
-  const text = raw.replace(/^\s+/, "");
-  if (text.startsWith("{")) return JSON.parse(text);
-  let fallback = null;
-  for (const line of text.split(/\r?\n/)) {
+/** 逐条产出 SSE 事件对象，非 data 行与坏帧直接跳过。 */
+function* iterSseEvents(raw) {
+  for (const line of String(raw).split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed.startsWith("data:")) continue;
     const data = trimmed.slice(5).trim();
@@ -146,13 +147,115 @@ function parseResponsesBody(raw) {
     } catch {
       continue;
     }
-    if (event.type === "response.completed") return event.response;
+    if (event && typeof event === "object") yield event;
+  }
+}
+
+/**
+ * 把 Responses 的 SSE 帧聚合成一个完整响应对象。
+ * 优先取 response.completed 的完整对象；只有增量帧时按 output_text.delta 拼接。
+ */
+function aggregateResponsesSse(text) {
+  let fallback = null;
+  const deltas = [];
+  let failure = null;
+  for (const event of iterSseEvents(text)) {
+    if (event.type === "response.completed" && event.response) return event.response;
+    if (event.type === "response.failed" || event.type === "error" || event.error) failure = event;
     if (event.response && Array.isArray(event.response.output) && event.response.output.length) {
       fallback = event.response;
     }
+    if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+      deltas.push(event.delta);
+    }
   }
   if (fallback) return fallback;
-  throw new Error(`上游返回的不是可解析的 Responses 响应：${raw.slice(0, 300)}`);
+  if (deltas.length) {
+    return {
+      status: "completed",
+      output: [{ type: "message", content: [{ type: "output_text", text: deltas.join("") }] }],
+    };
+  }
+  if (failure) {
+    const detail = failure.error || failure;
+    const message = typeof detail === "object" ? detail.message || JSON.stringify(detail) : detail;
+    throw new Error(`上游在流中返回错误：${message}`);
+  }
+  return null;
+}
+
+/** 聚合 Anthropic 的 SSE 帧：content_block_delta 拼正文，message_delta 取 stop_reason。 */
+function aggregateAnthropicSse(text) {
+  const parts = [];
+  let stopReason = null;
+  let seen = false;
+  for (const event of iterSseEvents(text)) {
+    seen = true;
+    if (event.type === "error") {
+      const detail = event.error || {};
+      const message = typeof detail === "object" ? detail.message : detail;
+      throw new Error(`上游在流中返回错误：${message || JSON.stringify(event)}`);
+    }
+    if (event.type === "content_block_delta" && event.delta && typeof event.delta.text === "string") {
+      parts.push(event.delta.text);
+    }
+    if (event.type === "message_delta" && event.delta && event.delta.stop_reason) {
+      stopReason = event.delta.stop_reason;
+    }
+  }
+  if (!seen) return null;
+  // 保留 stop_reason，截断样本才会被 extractText 拒收
+  const payload = { content: [{ type: "text", text: parts.join("") }] };
+  if (stopReason) payload.stop_reason = stopReason;
+  return payload;
+}
+
+/** 聚合 OpenAI Chat 的 SSE 帧：choices[0].delta.content 拼正文，末帧取 finish_reason。 */
+function aggregateOpenaiSse(text) {
+  const parts = [];
+  let finishReason = null;
+  let seen = false;
+  for (const event of iterSseEvents(text)) {
+    seen = true;
+    if (event.error) {
+      const detail = event.error;
+      const message = typeof detail === "object" ? detail.message : detail;
+      throw new Error(`上游在流中返回错误：${message || JSON.stringify(event)}`);
+    }
+    const choices = event.choices;
+    if (!Array.isArray(choices) || !choices.length) continue;
+    const choice = choices[0] || {};
+    const delta = choice.delta || {};
+    if (typeof delta.content === "string") parts.push(delta.content);
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+  }
+  if (!seen) return null;
+  // 保留 finish_reason，length/content_filter 仍会被 extractText 拒收
+  const out = { choices: [{ message: { content: parts.join("") } }] };
+  if (finishReason) out.choices[0].finish_reason = finishReason;
+  return out;
+}
+
+const SSE_AGGREGATORS = {
+  responses: aggregateResponsesSse,
+  anthropic: aggregateAnthropicSse,
+  openai: aggregateOpenaiSse,
+};
+
+/**
+ * 按响应形态决定解析方式：SSE 走聚合器，整包 JSON 直接 parse。
+ * 上游可能忽略 stream 参数回整包 JSON，也可能在非流式下回 SSE；两种都要吃下。
+ */
+function parseCompletionPayload(apiFormat, raw, contentType) {
+  const text = String(raw).replace(/^\s+/, "");
+  if (text.startsWith("{")) return JSON.parse(text);
+  const header = String(contentType || "").toLowerCase();
+  if (header.includes("text/event-stream") || text.startsWith("data:") || text.startsWith("event:")) {
+    const aggregated = SSE_AGGREGATORS[apiFormat](text);
+    if (aggregated) return aggregated;
+    throw new Error(`上游返回的流中没有可用事件：${String(raw).slice(0, 300)}`);
+  }
+  throw new Error(`上游返回的不是可解析的响应：${String(raw).slice(0, 300)}`);
 }
 
 /** 从 200 响应里取正文。形状不符或回答被截断时抛错，交由上层换下一种格式。 */
@@ -232,17 +335,24 @@ async function attemptFormat(apiFormat, options, emit) {
     ...extraHeaders,
   };
   if (apiFormat === "anthropic") headers["x-api-key"] = apiKey;
-  const payloadText = JSON.stringify(body);
 
   let lastError = null;
+  // 是否已升级为流式请求：400/422 或 200+空体说明该站拒绝非流式
+  let streaming = false;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    // 第 3 次无条件走流式兜底：前两次失败原因不可预测时也给流式一次机会
+    if (attempt >= MAX_ATTEMPTS) streaming = true;
+    body.stream = streaming;
+    const payloadText = JSON.stringify(body);
+
     let response;
     try {
       response = await fetch(url, { method: "POST", headers, body: payloadText });
     } catch (error) {
       const willRetry = attempt < MAX_ATTEMPTS;
       emit({ phase: "attempt", api_format: apiFormat, attempt, status: 0,
-        body: String(error && error.message || error), ok: false, done: !willRetry });
+        body: String(error && error.message || error), ok: false, done: !willRetry,
+        stream: streaming });
       lastError = new Error(`无法连接接口：${error && error.message || error}`);
       lastError.status = 0;
       lastError.body = String(error && error.message || error);
@@ -253,19 +363,38 @@ async function attemptFormat(apiFormat, options, emit) {
     const raw = await response.text();
     if (!response.ok) {
       const message = compactError(response.status, raw);
+      // 400/422 视为"拒绝当前请求形态"：升级为流式重试，而不是立刻换格式
+      const upgrade = !streaming && STREAM_REQUIRED_STATUS.has(response.status) && attempt < MAX_ATTEMPTS;
       const willRetry = attempt < MAX_ATTEMPTS && RETRYABLE_STATUS.has(response.status);
       emit({ phase: "attempt", api_format: apiFormat, attempt, status: response.status,
-        body: raw.slice(0, 2000), ok: false, done: !willRetry });
+        body: raw.slice(0, 2000), ok: false, done: !(willRetry || upgrade), stream: streaming });
       lastError = new Error(`HTTP ${response.status}: ${message}`);
       lastError.status = response.status;
       lastError.body = raw;
+      if (upgrade) { streaming = true; await sleep(RETRY_BASE_DELAY_MS * attempt); continue; }
       if (willRetry) { await sleep(RETRY_BASE_DELAY_MS * attempt); continue; }
       throw lastError;
     }
 
+    let payload;
+    try {
+      payload = parseCompletionPayload(apiFormat, raw, response.headers.get("Content-Type"));
+    } catch (error) {
+      // 200 也可能是网关的"非流式不支持"回落（空体或 HTML）。升级为流式再试，
+      // 这条路径覆盖了没有 400 可识别的失败模式。
+      if (!streaming && attempt < MAX_ATTEMPTS) {
+        emit({ phase: "attempt", api_format: apiFormat, attempt, status: response.status,
+          body: raw.slice(0, 2000), ok: false, done: false, stream: streaming });
+        streaming = true;
+        await sleep(RETRY_BASE_DELAY_MS * attempt);
+        continue;
+      }
+      throw error;
+    }
+
+    // ok 事件在拿到可解析正文后才推，避免"200 但空体"被前端当作成功
     emit({ phase: "attempt", api_format: apiFormat, attempt, status: response.status,
-      body: "", ok: true, done: true });
-    const payload = apiFormat === "responses" ? parseResponsesBody(raw) : JSON.parse(raw);
+      body: "", ok: true, done: true, stream: streaming });
     return extractText(apiFormat, payload);
   }
   throw lastError || new Error("上游请求失败");

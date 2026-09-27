@@ -35,6 +35,9 @@ DEFAULT_CODEX_VERSION = "0.156.1"
 # Responses 端点需要 SSE；带上流式请求头与服务端要求的 beta 特性，否则网关会返回空体
 CODEX_BETA_FEATURES = "prevent_idle_sleep,remote_compaction_v2"
 RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
+# 400/422 属于"参数被拒"：中转站拒绝非流式请求时就用这两个码，因此升级为流式再试一次。
+# 判定只看状态码，不匹配第三方网关的具体文案（措辞不可穷举，且"200 + 空体"根本无码可认）。
+STREAM_REQUIRED_STATUS = {400, 422}
 MAX_ATTEMPTS = 3
 RETRY_BASE_DELAY = 1.0
 
@@ -288,14 +291,9 @@ def _compact_upstream_error(details: str, fallback: str) -> str:
     return text[:500]
 
 
-def parse_responses_body(raw: str) -> dict:
-    """解析 Responses 响应。该端点在 stream=false 时仍可能回 SSE 帧，两种都要能取。"""
-    text = raw.lstrip()
-    if text.startswith("{"):
-        return json.loads(text)
-    # SSE 帧：取 response.completed / 最后一个 response.* 事件里的完整对象
-    result = None
-    for line in text.splitlines():
+def iter_sse_events(raw: str):
+    """逐条产出 SSE 事件对象，非 data 行与坏帧直接跳过。"""
+    for line in raw.splitlines():
         line = line.strip()
         if not line.startswith("data:"):
             continue
@@ -306,13 +304,131 @@ def parse_responses_body(raw: str) -> dict:
             event = json.loads(data)
         except json.JSONDecodeError:
             continue
-        if event.get("type") == "response.completed":
+        if isinstance(event, dict):
+            yield event
+
+
+def aggregate_responses_sse(text: str) -> dict | None:
+    """把 Responses 的 SSE 帧聚合成一个完整响应对象。
+
+    优先取 response.completed 里的完整对象；只有增量帧时按 output_text.delta 拼接，
+    并保留 response.failed / error 事件，供上层识别流内错误后换格式。
+    """
+    result = None
+    deltas: list[str] = []
+    failure = None
+    for event in iter_sse_events(text):
+        if event.get("type") == "response.completed" and isinstance(event.get("response"), dict):
             return event["response"]
+        if event.get("type") in {"response.failed", "error"} or event.get("error"):
+            failure = event
         if isinstance(event.get("response"), dict) and event["response"].get("output"):
             result = event["response"]
+        if event.get("type") == "response.output_text.delta" and isinstance(event.get("delta"), str):
+            deltas.append(event["delta"])
     if result is not None:
         return result
-    raise RuntimeError("上游返回的不是可解析的 Responses 响应：" + raw[:500])
+    if deltas:
+        # 增量帧没有完整 output，按 Responses 的形状手工组装，交给 extract_text 走同一条路径
+        return {
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "".join(deltas)}],
+                }
+            ],
+        }
+    if failure is not None:
+        # 把流内错误包装成可读异常，避免退化成"上游返回中没有文本内容"
+        detail = failure.get("error") or failure
+        if isinstance(detail, dict):
+            detail = detail.get("message") or json.dumps(detail, ensure_ascii=False)
+        raise RuntimeError(f"上游在流中返回错误：{detail}")
+    return None
+
+
+def aggregate_anthropic_sse(text: str) -> dict | None:
+    """聚合 Anthropic 的 SSE 帧：content_block_delta 拼正文，message_delta 取 stop_reason。"""
+    parts: list[str] = []
+    stop_reason = None
+    seen = False
+    for event in iter_sse_events(text):
+        seen = True
+        event_type = event.get("type")
+        if event_type == "error":
+            detail = event.get("error") or {}
+            message = detail.get("message") if isinstance(detail, dict) else detail
+            raise RuntimeError(f"上游在流中返回错误：{message or json.dumps(event, ensure_ascii=False)}")
+        if event_type == "content_block_delta":
+            delta = event.get("delta") or {}
+            if isinstance(delta.get("text"), str):
+                parts.append(delta["text"])
+        if event_type == "message_delta":
+            delta = event.get("delta") or {}
+            if delta.get("stop_reason"):
+                stop_reason = delta["stop_reason"]
+    if not seen:
+        return None
+    payload: dict = {"content": [{"type": "text", "text": "".join(parts)}]}
+    if stop_reason:
+        # 保留 stop_reason，截断样本才会被上层拒收
+        payload["stop_reason"] = stop_reason
+    return payload
+
+
+def aggregate_openai_sse(text: str) -> dict | None:
+    """聚合 OpenAI Chat 的 SSE 帧：choices[0].delta.content 拼正文，末帧取 finish_reason。"""
+    parts: list[str] = []
+    finish_reason = None
+    seen = False
+    for event in iter_sse_events(text):
+        seen = True
+        if event.get("error"):
+            detail = event["error"]
+            message = detail.get("message") if isinstance(detail, dict) else detail
+            raise RuntimeError(f"上游在流中返回错误：{message or json.dumps(event, ensure_ascii=False)}")
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0] or {}
+        delta = choice.get("delta") or {}
+        if isinstance(delta.get("content"), str):
+            parts.append(delta["content"])
+        if choice.get("finish_reason"):
+            finish_reason = choice["finish_reason"]
+    if not seen:
+        return None
+    message: dict = {"content": "".join(parts)}
+    choice_out: dict = {"message": message}
+    if finish_reason:
+        # 保留 finish_reason，length/content_filter 仍会被上层拒收
+        choice_out["finish_reason"] = finish_reason
+    return {"choices": [choice_out]}
+
+
+SSE_AGGREGATORS = {
+    "responses": aggregate_responses_sse,
+    "anthropic": aggregate_anthropic_sse,
+    "openai": aggregate_openai_sse,
+}
+
+
+def parse_completion_payload(api_format: str, raw: str, content_type: str = "") -> dict:
+    """按响应形态决定解析方式：SSE 走聚合器，整包 JSON 直接 loads。
+
+    用 Content-Type 而非"首字符是不是 {"来判定，因为上游可能忽略 stream 参数回整包 JSON，
+    也可能在非流式下回 SSE；两种都要吃下。
+    """
+    text = raw.lstrip()
+    if text.startswith("{"):
+        return json.loads(text)
+    if "text/event-stream" in (content_type or "").lower() or text.startswith("data:") or text.startswith("event:"):
+        aggregated = SSE_AGGREGATORS[api_format](text)
+        if aggregated is not None:
+            return aggregated
+        raise RuntimeError("上游返回的流中没有可用事件：" + raw[:300])
+    raise RuntimeError("上游返回的不是可解析的响应：" + raw[:300])
 
 
 def _emit(on_event, **event) -> None:
@@ -396,10 +512,17 @@ def _request_completion(
         }
     if temperature is not None:
         body_data["temperature"] = temperature
-    body = json.dumps(body_data).encode("utf-8")
     url = completion_url(base_url, api_format)
     payload = None
+    content_type = ""
+    # 是否已升级为流式请求：400/422 或 200+空体说明该站拒绝非流式
+    streaming = False
     for attempt in range(1, MAX_ATTEMPTS + 1):
+        # 第 3 次无条件走流式兜底：前两次失败原因不可预测时也给流式一次机会
+        if attempt >= MAX_ATTEMPTS:
+            streaming = True
+        body_data["stream"] = streaming
+        body = json.dumps(body_data).encode("utf-8")
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         started = time.monotonic()
 
@@ -407,7 +530,7 @@ def _request_completion(
             """统一上游请求日志格式：格式/端点/模型/次数 + 结果 + 耗时。"""
             print(
                 f"[上游请求] {api_format} POST {url} model={api_model} "
-                f"attempt={attempt} {outcome} "
+                f"attempt={attempt} stream={streaming} {outcome} "
                 f"耗时={time.monotonic() - started:.2f}s",
                 flush=True,
             )
@@ -415,23 +538,46 @@ def _request_completion(
         try:
             with urllib.request.urlopen(request, timeout=240) as response:
                 status = response.status
+                content_type = response.headers.get("Content-Type", "")
                 raw = response.read().decode("utf-8")
             log_upstream(f"status={status} bytes={len(raw)}")
+            try:
+                payload = parse_completion_payload(api_format, raw, content_type)
+            except (RuntimeError, json.JSONDecodeError) as error:
+                # 200 也可能是网关的"非流式不支持"回落（空体或 HTML）。升级为流式再试，
+                # 这条路径覆盖了没有 400 可识别的失败模式。
+                if not streaming and attempt < MAX_ATTEMPTS:
+                    log_upstream(f"200 但解析失败，升级为流式重试：{error}")
+                    _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
+                          status=status, body=raw[:2000], ok=False, done=False, stream=streaming)
+                    streaming = True
+                    time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
+                    continue
+                raise
+            # ok 事件在拿到可解析正文后才推，避免"200 但空体"被前端当作成功
             _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
-                  status=status, body="", ok=True)
-            payload = (
-                parse_responses_body(raw) if api_format == "responses" else json.loads(raw)
-            )
+                  status=status, body="", ok=True, done=True, stream=streaming)
             break
         except urllib.error.HTTPError as error:
             details = error.read().decode("utf-8", errors="replace").strip()
             message = _compact_upstream_error(details, error.reason)
             retried = f"（已自动重试 {attempt - 1} 次）" if attempt > 1 else ""
             log_upstream(f"status={error.code} body={details[:500]}")
+            # 400/422 视为"拒绝当前请求形态"：升级为流式重试，而不是立刻换格式
+            upgrade = (
+                not streaming
+                and error.code in STREAM_REQUIRED_STATUS
+                and attempt < MAX_ATTEMPTS
+            )
             will_retry = attempt < MAX_ATTEMPTS and error.code in RETRYABLE_STATUS
             # 每次尝试都推一条，前端据此就地刷新该端点的卡片
             _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
-                  status=error.code, body=details, ok=False, done=not will_retry)
+                  status=error.code, body=details, ok=False, done=not (will_retry or upgrade),
+                  stream=streaming)
+            if upgrade:
+                streaming = True
+                time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
+                continue
             if will_retry:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue
@@ -443,7 +589,7 @@ def _request_completion(
             log_upstream(f"无法连接 reason={reason}")
             will_retry = attempt < MAX_ATTEMPTS
             _emit(on_event, phase="attempt", api_format=api_format, attempt=attempt,
-                  status=0, body=str(reason), ok=False, done=not will_retry)
+                  status=0, body=str(reason), ok=False, done=not will_retry, stream=streaming)
             if will_retry:
                 time.sleep(RETRY_BASE_DELAY * attempt + random.uniform(0, 0.5))
                 continue

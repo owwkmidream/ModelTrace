@@ -62,12 +62,24 @@ npm run deploy
 
 ```
 probe_start  { phase, api_format }
-attempt      { phase, api_format, attempt, status, body, ok, done }
+attempt      { phase, api_format, attempt, status, body, ok, done, stream }
 probe_end    { phase, api_format, ok }
 result       { phase, text, api_format }  或  { phase, error, status, body }
 ```
 
 请求体可带 `preferred_format`，Worker 会把它提到探测顺序最前，避免每个挑战重探三个端点。
+
+### 上游请求形态：按需升级为流式
+
+部分中转站只接受流式请求，对非流式一律返回 400。探测时的升级策略：
+
+1. 先用 `stream: false` 请求。
+2. 收到 `400 / 422`，或收到 `200` 但响应体解析不出正文（空体、HTML 回落等），则把后续尝试升级为 `stream: true`。
+3. 第 3 次尝试无条件带 `stream: true` 兜底，覆盖前两次失败原因不可预测的情况。
+
+判定只看状态码与响应形态，不匹配网关的具体文案——措辞不可穷举，且"200 + 空体"这类失败根本无状态码可认。
+
+正文解析同时兼容 SSE 分片与整包 JSON（`Content-Type` 与首字符共同判定），因此上游忽略 `stream` 参数时也能正常取正文。三种格式各自聚合：Responses 取 `response.completed` 或按 `output_text.delta` 拼接，Anthropic 取 `content_block_delta` + `message_delta`，Chat 取 `choices[0].delta.content` + `finish_reason`。截断判定（`finish_reason: length`、`stop_reason: max_tokens`、`status: incomplete`）在流式下同样生效，被截断的样本不会进入指纹库。
 
 ## 与自托管版的差异
 
