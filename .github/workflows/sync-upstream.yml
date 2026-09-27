@@ -1,0 +1,53 @@
+name: Sync upstream
+
+# 每天 UTC 02:00（北京时间 10:00）自动同步上游，也可在 Actions 页手动触发。
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+# 需要写权限才能把同步结果推回本 fork。
+permissions:
+  contents: write
+
+# 定时与手动触发可能撞车，串行执行且不打断进行中的同步。
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0          # 合并需要完整历史
+
+      - name: 拉取上游
+        run: |
+          git remote add upstream https://github.com/xqy2006/ModelTrace.git
+          git fetch upstream main
+
+      - name: 合并上游改动
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 本仓库有自有提交，通常不是快进；优先快进，否则常规合并。
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "已是最新，无需同步。"
+            exit 0
+          fi
+          if git merge --ff-only upstream/main; then
+            echo "快进合并完成。"
+          elif git merge --no-edit upstream/main; then
+            echo "常规合并完成。"
+          else
+            echo "::error::上游改动与本仓库冲突，需人工处理后再同步。"
+            git status --short
+            exit 1
+          fi
+
+      - name: 推送回 fork
+        run: git push origin HEAD:main
