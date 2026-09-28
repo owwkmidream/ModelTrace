@@ -182,10 +182,11 @@ function renderResultHtml(payload) {
   `;
 }
 
-function renderResult(payload) {
+// scroll=false 供实时刷新使用：只更新内容，不抢用户的滚动位置
+function renderResult(payload, { scroll = true } = {}) {
   byId("result").innerHTML = renderResultHtml(payload);
   byId("result").hidden = false;
-  byId("result").scrollIntoView({ behavior: "smooth", block: "start" });
+  if (scroll) byId("result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function analyzeManual() {
@@ -365,6 +366,37 @@ async function testViaApi(event) {
   resetEndpointCards();
   renderApiProgress(states, "已生成独立挑战，准备调用模型");
 
+  /**
+   * 用当前已收集的有效回答算一次归因并就地渲染。
+   * 每收到一份有效回答就调用：1 份即可出结果，后续份数覆盖更新。
+   * scroll 只在首次展示时给 true，避免后续刷新抢走用户的滚动位置。
+   * 归因失败返回 null，由调用方统一提示，不打断后续挑战的收集。
+   */
+  async function updateResult(scroll) {
+    let response;
+    try {
+      response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ outputs }),
+      });
+    } catch (error) {
+      // 软停止会中断在途请求：这不是归因失败，也不该把已计入的回答标成错误
+      if (runStopped || error.name === "AbortError") return null;
+      errors.push(`归因失败：${error.message}`);
+      return null;
+    }
+    const payload = await response.json();
+    if (!response.ok) {
+      errors.push(`归因失败：${payload.error || "无法完成归因"}`);
+      return null;
+    }
+    renderResult(payload, { scroll });
+    return payload;
+  }
+
+  let latestResult = null;   // 最近一次成功的归因，收尾时补上统计信息直接复用
+
   for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
     if (runStopped) break;
     states[index] = "working";
@@ -385,6 +417,10 @@ async function testViaApi(event) {
       if (payload.accepted) {
         outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
         states[index] = "done";
+        // 收到即归因：让概率表随着有效回答的份数逐份生长，而不是等满 3 份才出现
+        renderApiProgress(states, `已获得 ${outputs.length} 份有效回答，正在更新归因概率……`);
+        const result = await updateResult(outputs.length === 1);
+        if (result) latestResult = result;
       } else {
         errors.push(`尝试 ${index + 1}: 有效数字 ${payload.parsed_numbers}/${payload.minimum_numbers}`);
         states[index] = "invalid";
@@ -416,28 +452,26 @@ async function testViaApi(event) {
     return;
   }
 
-  renderApiProgress(states, "模型回答已收齐，正在计算归因概率……");
-  const analysisResponse = await fetch("/api/analyze", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ outputs }),
-  });
-  const result = await analysisResponse.json();
-  if (analysisResponse.ok) {
-    const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
-    result.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
-    renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
-    renderResult(result);
-    appendHistory(historyEntry(configuration, startedAt, {
-      accepted: outputs.length,
-      attempted,
-      failures,
-      result,
-    }));
-  } else {
-    // 归因接口失败同样不入历史
-    setMessage(byId("test-message"), result.error || "API 自动测试失败。", "error");
+  // 最后一份的归因若也失败，结果会落后于已收集份数，补算一次让展示与历史一致
+  if (!latestResult || latestResult.used_outputs !== outputs.length) {
+    latestResult = (await updateResult(false)) || latestResult;
   }
+  if (!latestResult) {
+    // 归因接口失败同样不入历史
+    setMessage(byId("test-message"), errors[errors.length - 1] || "API 自动测试失败。", "error");
+    return;
+  }
+
+  const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
+  latestResult.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
+  renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
+  renderResult(latestResult, { scroll: false });   // 收尾只补统计信息，不再抢滚动
+  appendHistory(historyEntry(configuration, startedAt, {
+    accepted: outputs.length,
+    attempted,
+    failures,
+    result: latestResult,
+  }));
   renderHistory();
 }
 
