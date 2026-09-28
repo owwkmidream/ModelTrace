@@ -437,17 +437,22 @@ async function testViaApi(event, mode = "auto") {
   }
 
   let latestResult = null;   // 最近一次成功的归因，收尾时补上统计信息直接复用
+  // 单步门的开关：只有"上一轮真的产出了有效回答"才该停下来等用户。
+  // 报错、数字不足这些没有产出的轮次不算数——那种情况下自动继续下一轮才对，
+  // 否则用户点一次单步只得到一次失败，还得反复点，白白浪费挑战次数。
+  let stepGate = false;
 
   for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
     if (runStopped) break;
-    // 单步模式下每轮开始前都等用户再点一次；第 1 轮是本次点击本身触发的，不用再等
-    if (stepMode && index > 0) {
-      renderApiProgress(states, `已完成 ${index} 轮，点击「继续下一轮」发起第 ${index + 1} 轮`);
+    // 上一轮产出了有效回答，才在这里等用户点「继续下一轮」
+    if (stepMode && stepGate) {
+      renderApiProgress(states, `已获得 ${outputs.length} 份有效回答，点击「继续下一轮」发起第 ${index + 1} 轮`);
       const pending = waitForStepClick();   // 先登记 resolve，按钮才会渲染成「继续下一轮」
       renderStepButton();
       await pending;
       if (runStopped) break;
     }
+    stepGate = false;   // 本轮开始前先复位，只有本轮真的产出有效回答才会重新置位
     states[index] = "working";
     renderApiProgress(states, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
     try {
@@ -466,6 +471,7 @@ async function testViaApi(event, mode = "auto") {
       if (payload.accepted) {
         outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
         states[index] = "done";
+        stepGate = true;   // 本轮产出了有效回答：单步模式下该停下来让用户决定是否继续
         // 收到即归因：让概率表随着有效回答的份数逐份生长，而不是等满 3 份才出现
         renderApiProgress(states, `已获得 ${outputs.length} 份有效回答，正在更新归因概率……`);
         const result = await updateResult(outputs.length === 1);

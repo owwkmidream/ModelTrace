@@ -135,8 +135,11 @@ async function bootIntegration({ probeFrames, expectedModel = "gpt-5.4" }) {
   win.fetch = async (input, init = {}) => {
     const url = typeof input === "string" ? input : input.url;
     if (url === "/api/probe") {
+      // probeFrames 可以是固定帧数组，也可以是 (第几次调用, 从 0 起) 取帧的函数，
+      // 后者用来复现"前一轮失败、后一轮成功"这类跨轮次不同的上游响应
+      const call = upstreamCalls.length;
       upstreamCalls.push(JSON.parse(init.body));
-      return workerSseResponse(probeFrames);
+      return workerSseResponse(typeof probeFrames === "function" ? probeFrames(call) : probeFrames);
     }
     if (String(url).includes("unified_bank.json")) {
       return new Response(await readFile(join(PUBLIC, "data", "unified_bank.json"), "utf8"), { status: 200 });
@@ -351,6 +354,52 @@ test("整合：单步模式每次点击只发一轮，不会在结果渲染前�
   await stepHandlers[0]({ preventDefault() {} });
   for (let index = 0; index < 80; index += 1) await Promise.resolve();
   assert.equal(upstreamCalls.length, 2, `第二次点击应发第 2 轮，实际 ${upstreamCalls.length}`);
+});
+
+test("整合：单步模式下首轮数字不足时自动续跑，直到真正产出有效回答才停", async () => {
+  // 回归：门原本开在 index > 0，只要"不是第一轮"就挂起，
+  // 于是首轮报错或数字不足时也会停下等点击——用户点一次单步只换来一次失败。
+  // 预期是单步只在"产出了有效回答"之后才停，失败轮次应当自动继续。
+  const good = acceptedNumbers();
+  const frames = (call) => (call === 0
+    // 第 1 轮：接口正常但数字不足（"invalid"），没有产出
+    ? [{ phase: "result", text: "1 2 3", api_format: "anthropic" }]
+    // 第 2 轮：足量数字，产出有效回答
+    : [{ phase: "result", text: good, api_format: "anthropic" }]);
+  const { dom, upstreamCalls } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+  dom.nodes.get("test-api-model").value = "gpt-x";
+
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 120; index += 1) await Promise.resolve();
+
+  assert.equal(upstreamCalls.length, 2, `首轮无产出应自动续跑第 2 轮，实际发了 ${upstreamCalls.length} 次`);
+  assert.equal(dom.nodes.get("api-test-step").textContent, "继续下一轮", "产出有效回答后才应停下等点击");
+
+  // 停在这里等用户：不会再自行抢跑
+  for (let index = 0; index < 40; index += 1) await Promise.resolve();
+  assert.equal(upstreamCalls.length, 2, "等待期间不应再发探测");
+});
+
+test("整合：单步模式下接口报错时同样自动续跑", async () => {
+  // 与数字不足同源：报错轮次也没有产出，不该占用单步的一次停顿
+  const good = acceptedNumbers();
+  const frames = (call) => (call === 0
+    ? [{ phase: "result", error: "接口格式自动探测失败；responses: 404", status: 404, body: "" }]
+    : [{ phase: "result", text: good, api_format: "anthropic" }]);
+  const { dom, upstreamCalls } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+  dom.nodes.get("test-api-model").value = "gpt-x";
+
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 120; index += 1) await Promise.resolve();
+
+  assert.equal(upstreamCalls.length, 2, `首轮报错应自动续跑第 2 轮，实际发了 ${upstreamCalls.length} 次`);
+  assert.equal(dom.nodes.get("api-test-step").textContent, "继续下一轮", "产出有效回答后才应停下等点击");
 });
 
 test("整合：自动模式仍然连发，一测到底拿满 3 份", async () => {
