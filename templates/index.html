@@ -101,10 +101,12 @@
               <button class="button primary" id="api-test-start" type="submit">开始测试</button>
             </div>
           </form>
+          <div id="session-tabs" class="session-tabs" role="tablist" aria-label="测试任务" hidden></div>
           <section id="api-test-progress" class="progress-panel" hidden aria-live="polite">
             <div class="progress-heading"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
             <div class="progress-track"><i id="api-progress-fill"></i></div>
             <div id="api-progress-steps" class="progress-steps"></div>
+            <div class="endpoint-heading"><button class="button secondary compact" id="api-test-stop" type="button">停止当前任务</button></div>
             <div id="endpoint-cards" class="endpoint-cards" hidden aria-live="polite"></div>
           </section>
         </section>

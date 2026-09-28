@@ -267,6 +267,39 @@ label code { color: var(--primary-dark); }
 .form-footer { justify-content: flex-end; padding: 12px 17px; border-top: 1px solid var(--line); }
 
 .progress-panel { margin-top: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+
+/* ── 并发测试的标签条 ──
+   只有 1 个会话时由 app.js 置 hidden，单任务时看不到这一条。
+   色块配色与 .progress-step 六态一致：绿=有效 黄=数字不足 红=接口失败 灰=未开始。 */
+.session-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.session-tabs[hidden] { display: none; }
+.session-tab {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 9px 7px 11px;
+  color: var(--muted);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  cursor: pointer; font-size: 11px;
+}
+.session-tab:hover { background: var(--surface-soft); }
+.session-tab.active { color: var(--text); border-color: var(--primary); background: var(--primary-tint); }
+.tab-cells { display: flex; gap: 2px; flex: 0 0 auto; }
+.tab-cell { width: 7px; height: 16px; border-radius: 2px; background: var(--control-track); }
+.tab-cell.working { background: var(--primary); }
+.tab-cell.done { background: var(--success); }
+.tab-cell.invalid { background: var(--warning); }
+.tab-cell.error { background: var(--danger); }
+.tab-cell.skipped { background: var(--control-track); opacity: .45; }
+.tab-label { font-weight: 650; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-count { font-variant-numeric: tabular-nums; opacity: .8; }
+.tab-close {
+  display: grid; place-items: center; width: 18px; height: 18px;
+  padding: 0; color: var(--muted); background: transparent;
+  border: 0; border-radius: 50%; font-size: 13px; line-height: 1; cursor: pointer;
+}
+.tab-close:hover { color: var(--on-danger); background: var(--danger); }
+.endpoint-heading { display: flex; justify-content: flex-end; margin-top: 11px; }
+.button.compact { min-height: 28px; padding: 5px 10px; font-size: 11px; }
+
 .progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 9px; }
 .progress-heading strong { font-size: 12px; }
 .progress-heading span { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

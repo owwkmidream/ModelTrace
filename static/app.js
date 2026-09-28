@@ -7,6 +7,22 @@ const state = {
 
 const byId = (id) => document.getElementById(id);
 
+// ── 测试会话注册表 ──
+// 每个提交出来的测试是一个会话，各自持有配置、挑战、进度与中止句柄，互不干扰。
+// 下方主面板（进度区 / 端点卡片 / 结果表）永远只投影「焦点会话」，所以并发时
+// 后台会话只推进自己的数据、不写这几个单例节点，由 isFocused 统一守住。
+const sessions = new Map();
+let focusedSessionId = null;
+let sessionSeq = 0;
+
+function isFocused(session) {
+  return Boolean(session) && !session.closed && session.id === focusedSessionId;
+}
+
+function focusedSession() {
+  return sessions.get(focusedSessionId) || null;
+}
+
 // ── 本地存档与历史记录（localStorage，纯前端，不上传）──
 const CONFIG_KEY = "modeltrace.configs";
 const HISTORY_KEY = "modeltrace.history";
@@ -184,8 +200,10 @@ function renderResultHtml(payload) {
   `;
 }
 
-// scroll=false 供实时刷新使用：只更新内容，不抢用户的滚动位置
-function renderResult(payload, { scroll = true } = {}) {
+// scroll=false 供实时刷新使用：只更新内容，不抢用户的滚动位置。
+// session 为 null 表示手动模式（不隶属任何测试会话），无条件渲染。
+function renderResult(session, payload, { scroll = true } = {}) {
+  if (session && !isFocused(session)) return;   // 后台会话不碰主面板
   byId("result").innerHTML = renderResultHtml(payload);
   byId("result").hidden = false;
   if (scroll) byId("result").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -203,7 +221,7 @@ async function analyzeManual() {
   const payload = await response.json();
   if (response.ok) {
     setMessage(byId("test-message"), "");
-    renderResult(payload);
+    renderResult(null, payload);
   } else {
     setMessage(byId("test-message"), payload.error || "无法完成归因。", "error");
     byId("result").hidden = true;
@@ -216,25 +234,25 @@ const FORMAT_LABELS = { responses: "Responses", anthropic: "Anthropic", openai: 
 // ── 端点探测卡片：一行 3 张，对应探测顺序 Responses → Anthropic → Chat ──
 // 每次尝试都就地刷新对应卡片（HTTP 状态码 + body），端点结束后固定。
 // 探测成功时这些卡片没有参考价值，直接清空。
-let endpointProbes = new Map();   // api_format -> {attempt, status, body, ok, done}
+// 数据挂在 session.probes 上，渲染只对焦点会话生效（见文件顶部的会话注册表说明）。
 
-function resetEndpointCards() {
-  endpointProbes = new Map();
+function resetEndpointCards(session) {
+  session.probes = new Map();
+  if (!isFocused(session)) return;
   byId("endpoint-cards").innerHTML = "";
   byId("endpoint-cards").hidden = true;
 }
 
-function applyProbeEvent(event) {
+function applyProbeEvent(session, event) {
   if (event.phase === "probe_start") {
-    if (!endpointProbes.has(event.api_format)) {
-      endpointProbes.set(event.api_format, { attempt: 0, status: null, body: "", ok: false, done: false, fresh: true, stream: false });
+    if (!session.probes.has(event.api_format)) {
+      session.probes.set(event.api_format, { attempt: 0, status: null, body: "", ok: false, done: false, fresh: true, stream: false });
     }
-    renderEndpointCards();
+    renderEndpointCards(session);
     return;
   }
   if (event.phase !== "attempt") return;
-  const previous = endpointProbes.get(event.api_format) || {};
-  endpointProbes.set(event.api_format, {
+  session.probes.set(event.api_format, {
     attempt: event.attempt,
     status: event.status,
     body: event.body || "",
@@ -243,18 +261,19 @@ function applyProbeEvent(event) {
     fresh: false,
     stream: Boolean(event.stream),
   });
-  renderEndpointCards();
+  renderEndpointCards(session);
 }
 
-function renderEndpointCards() {
+function renderEndpointCards(session) {
+  if (!isFocused(session)) return;   // 后台会话不碰主面板
   const container = byId("endpoint-cards");
-  if (!endpointProbes.size) {
+  if (!session.probes.size) {
     container.hidden = true;
     container.innerHTML = "";
     return;
   }
   container.hidden = false;
-  container.innerHTML = [...endpointProbes.entries()].map(([apiFormat, probe]) => {
+  container.innerHTML = [...session.probes.entries()].map(([apiFormat, probe]) => {
     const state = probe.ok ? "ok" : probe.status ? "fail" : "pending";
     const status = probe.ok ? "HTTP 200 成功" : probe.status ? `HTTP ${probe.status}` : "连接失败";
     const attempt = probe.attempt ? `第 ${probe.attempt}/${3} 次尝试` : "准备请求";
@@ -304,7 +323,9 @@ async function probeViaStream(configuration, challenge, onEvent, signal) {
   return final;
 }
 
-function renderApiProgress(states, status) {
+function renderApiProgress(session, status) {
+  if (!isFocused(session)) return;
+  const states = session.states;
   const valid = states.filter((state) => state === "done").length;
   const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
   const target = 3;
@@ -318,97 +339,228 @@ function renderApiProgress(states, status) {
   }).join("");
 }
 
-// 测试运行状态：开始/停止复用同一个按钮
-let runAbort = null;
-let runActive = false;
-let runStopped = false;
-// 单步模式：每轮开始前把循环挂在「单步测试」按钮上，等用户再点一次才发下一次上游请求。
-// 存在的意义是自动模式会在结果渲染出来之前就发起下一轮（归因往返只要几十毫秒，
-// 用户根本来不及点停止），单步保证每次都能先看到结果再决定要不要继续，不多打上游。
-let stepMode = false;
-let stepResolver = null;   // 挂起时存下的 resolve，点单步或停止时唤醒
+// ── 标签条：只有 1 个会话时整体隐藏，行为与没有并发时完全一致 ──
+// 每个标签 = 6 个色块（对应 states 的六态，配色复用 .progress-step）+ 名字 + 尝试/总轮次。
+// 色块取色与主进度区同源，所以扫一眼标签就知道哪个任务卡在红/黄上。
 
-// 一个按钮两种身份：空闲时是「开始测试」，运行中变成「停止测试」
-function setTestRunning(running) {
-  runActive = running;
+// 标签名太长会撑爆标签条，这里做一次粗粒度截断，模型名本身较短、主要是地址会超
+function shortTabLabel(label) {
+  return label.length <= 42 ? label : `${label.slice(0, 39)}…`;
+}
+
+function renderTabs() {
+  const strip = byId("session-tabs");
+  const list = [...sessions.values()].filter((session) => !session.closed);
+  // 只有一个会话时不显示标签条：单任务体验与改造前零差异
+  if (list.length <= 1) {
+    strip.hidden = true;
+    strip.innerHTML = "";
+    return;
+  }
+  strip.hidden = false;
+  strip.innerHTML = list.map((session) => {
+    const states = session.states;
+    // 挑战还没拉回来时给一排 pending 占位，避免标签宽度在开局时跳动
+    const cells = (states.length ? states : Array(6).fill("pending"))
+      .map((state) => `<i class="tab-cell ${state}"></i>`)
+      .join("");
+    const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
+    const total = states.length || 6;
+    const active = session.id === focusedSessionId ? " active" : "";
+    const running = session.running ? " running" : "";
+    return `
+      <div class="session-tab${active}${running}" data-session="${session.id}" role="tab" aria-selected="${session.id === focusedSessionId}">
+        <span class="tab-cells" title="6 次尝试的进度：绿=有效 黄=数字不足 红=接口失败 灰=未开始">${cells}</span>
+        <span class="tab-label" title="${escapeHtml(session.label)}">${escapeHtml(shortTabLabel(session.label))}</span>
+        <span class="tab-count">${attempted}/${total}</span>
+        <button class="tab-close" type="button" data-close-session="${session.id}" aria-label="关闭 ${escapeHtml(session.label)}" title="关闭">×</button>
+      </div>
+    `;
+  }).join("");
+}
+
+// 标签条用事件委托：内容每次重绘都会换掉，逐节点绑定会随重绘不断堆积监听器。
+// 委托只在这里绑一次，点击落点由 data-session / data-close-session 决定。
+byId("session-tabs").addEventListener("click", (event) => {
+  const target = event.target;
+  if (!target || typeof target.closest !== "function") return;
+  const closeNode = target.closest("[data-close-session]");
+  if (closeNode) {
+    closeSession(closeNode.dataset.closeSession);
+    return;
+  }
+  const tabNode = target.closest("[data-session]");
+  if (tabNode) focusSession(tabNode.dataset.session);
+});
+
+// 切换焦点：把该会话的进度区、端点卡片、结果表整块投影到主面板
+function focusSession(id) {
+  const session = sessions.get(id);
+  if (!session || session.closed) return;
+  focusedSessionId = id;
+  renderTabs();
+  renderStepButton();
+  setTestRunning();
+  if (session.states.length) {
+    const valid = session.states.filter((state) => state === "done").length;
+    renderApiProgress(session, session.running
+      ? `正在进行第 ${session.states.indexOf("working") + 1} 次尝试`
+      : `有效 ${valid}/3 份回答`);
+  } else {
+    byId("api-test-progress").hidden = true;
+  }
+  renderEndpointCards(session);
+  if (session.latestResult) {
+    renderResult(session, session.latestResult, { scroll: false });
+  } else {
+    byId("result").hidden = true;
+  }
+}
+
+// 关闭标签：还在跑就先中止再移除。结果早已写进 localStorage 历史，关掉不丢数据。
+function closeSession(id) {
+  const session = sessions.get(id);
+  if (!session) return;
+  stopSession(session);
+  session.closed = true;
+  sessions.delete(id);
+  if (focusedSessionId === id) {
+    const remaining = [...sessions.values()];
+    focusedSessionId = remaining.length ? remaining[remaining.length - 1].id : null;
+  }
+  renderTabs();
+  const next = focusedSession();
+  if (next) {
+    focusSession(next.id);
+  } else {
+    byId("api-test-progress").hidden = true;
+    byId("result").hidden = true;
+    byId("endpoint-cards").innerHTML = "";
+    byId("endpoint-cards").hidden = true;
+    renderStepButton();
+  }
+}
+
+// 主按钮固定是「开始测试」，这样跑着 A 也能再提交 B；停止交给标签上的 ×
+// 与进度区里的停止按钮，不会出现"按钮写着停止、点下去却不知道该停哪个"的歧义。
+
+// 新建一个会话：持有自己的配置、挑战、进度、中止句柄与单步挂起句柄
+function createSession(configuration, mode) {
+  sessionSeq += 1;
+  const session = {
+    id: `s${sessionSeq}`,
+    seq: sessionSeq,
+    configuration,
+    mode,
+    label: "",
+    running: true,
+    stopped: false,
+    closed: false,
+    abort: new AbortController(),
+    resolver: null,
+    stepGate: false,
+    challenges: [],
+    states: [],
+    outputs: [],
+    errors: [],
+    failures: [],
+    probes: new Map(),
+    latestResult: null,
+    startedAt: Date.now(),
+  };
+  sessions.set(session.id, session);
+  focusedSessionId = session.id;
+  return session;
+}
+
+// 主按钮恒为「开始测试」：并发的入口不能被运行中的任务占住
+function setTestRunning() {
   const button = byId("api-test-start");
-  button.textContent = running ? "停止测试" : "开始测试";
-  button.className = `button ${running ? "danger" : "primary"}`;
+  button.textContent = "开始测试";
+  button.className = "button primary";
   button.disabled = false;
-  if (running) byId("api-test-progress").hidden = false;
   renderStepButton();
 }
 
-// 单步按钮的三种身份：空闲=单步测试；挂起等待中=继续下一轮；请求在飞=请求中（禁用）
+// 单步按钮跟随焦点会话的三态：空闲/单步测试；挂起/继续下一轮；在飞/请求中（禁用）
 function renderStepButton() {
   const button = byId("api-test-step");
-  if (!runActive) {
+  const session = focusedSession();
+  if (!session || !session.running) {
     button.textContent = "单步测试";
     button.disabled = false;
     return;
   }
-  if (stepResolver) {
+  if (session.resolver) {
     button.textContent = "继续下一轮";
     button.disabled = false;
     return;
   }
-  button.textContent = stepMode ? "请求中……" : "单步测试";
+  button.textContent = session.mode === "step" ? "请求中……" : "单步测试";
   button.disabled = true;
 }
 
 // 把循环挂起在单步门上：返回的 Promise 只在用户点单步或点停止时才结算
-function waitForStepClick() {
-  return new Promise((resolve) => { stepResolver = resolve; });
+function waitForStepClick(session) {
+  return new Promise((resolve) => { session.resolver = resolve; });
 }
 
 // 唤醒挂起的单步循环；没有挂起时是空操作。
 // 唤醒后立刻重绘按钮：循环恢复是异步的（要等一个微任务），这段时间里按钮必须
 // 显示成「请求中……」并禁用，否则会一直停在「继续下一轮」的可点外观上。
-function resumeStep() {
-  if (!stepResolver) return;
-  const resume = stepResolver;
-  stepResolver = null;
+function resumeStep(session) {
+  if (!session.resolver) return;
+  const resume = session.resolver;
+  session.resolver = null;
   resume();
   renderStepButton();
 }
 
-function stopTest() {
-  if (!runActive) return;
-  runStopped = true;
-  byId("api-test-start").disabled = true;   // 中断期间防重复点击，收尾时统一恢复
-  if (runAbort) runAbort.abort();
-  resumeStep();   // 挂起在单步门上时也要唤醒，否则永远走不到收尾
+// 停止：置位停止标志、中止在途请求，并唤醒可能挂起的单步门
+function stopSession(session) {
+  if (!session || !session.running) return;
+  session.stopped = true;
+  session.abort.abort();
+  resumeStep(session);
 }
 
 async function testViaApi(event, mode = "auto") {
   event.preventDefault();
-  if (runActive) return;   // 运行中再次提交（回车等）不重入
-  byId("result").hidden = true;
   setMessage(byId("test-message"), "");
-  runStopped = false;
-  stepMode = mode === "step";
-  stepResolver = null;
-  runAbort = new AbortController();
-  setTestRunning(true);
-
-  const startedAt = Date.now();
-  const challengeResponse = await fetch("/api/challenges");
-  const firstBatch = (await challengeResponse.json()).challenges;
-  const retryResponse = await fetch("/api/challenges");
-  const challenges = firstBatch.concat((await retryResponse.json()).challenges);
-  const states = challenges.map(() => "pending");
-  const outputs = [];
-  const errors = [];        // 展示用文本
-  const failures = [];      // 结构化失败信息（status + body），写入历史
-  const target = 3;
   const configuration = {
     base_url: byId("test-api-base").value,
     api_key: byId("test-api-key").value,
     api_model: byId("test-api-model").value,
     temperature: optionalNumber("test-temperature"),
   };
-  resetEndpointCards();
-  renderApiProgress(states, "已生成独立挑战，准备调用模型");
+  runTestSession(configuration, mode);
+}
+
+// 一个测试会话的完整生命周期。并发时多个实例同时推进，各自只写自己的 session，
+// 主面板由 isFocused 守卫，只有焦点会话能渲染。
+async function runTestSession(configuration, mode = "auto") {
+  const session = createSession(configuration, mode);
+  // 标签名：配置名或地址 + 模型 + 序号，撞名时序号天然区分开
+  session.label = `${configNameFor(configuration.base_url, configuration.api_key) || shortUrl(configuration.base_url)} · ${configuration.api_model} #${session.seq}`;
+  renderTabs();
+  renderStepButton();
+  byId("result").hidden = true;
+
+  const startedAt = session.startedAt;
+  const challengeResponse = await fetch("/api/challenges");
+  const firstBatch = (await challengeResponse.json()).challenges;
+  const retryResponse = await fetch("/api/challenges");
+  const challenges = firstBatch.concat((await retryResponse.json()).challenges);
+  const states = challenges.map(() => "pending");
+  const outputs = session.outputs;
+  const errors = session.errors;
+  const failures = session.failures;
+  const target = 3;
+  session.challenges = challenges;
+  session.states = states;
+  resetEndpointCards(session);
+  renderApiProgress(session, "已生成独立挑战，准备调用模型");
+  renderTabs();
 
   /**
    * 用当前已收集的有效回答算一次归因并就地渲染。
@@ -426,7 +578,7 @@ async function testViaApi(event, mode = "auto") {
       });
     } catch (error) {
       // 软停止会中断在途请求：这不是归因失败，也不该把已计入的回答标成错误
-      if (runStopped || error.name === "AbortError") return null;
+      if (session.stopped || error.name === "AbortError") return null;
       errors.push(`归因失败：${error.message}`);
       return null;
     }
@@ -435,48 +587,45 @@ async function testViaApi(event, mode = "auto") {
       errors.push(`归因失败：${payload.error || "无法完成归因"}`);
       return null;
     }
-    renderResult(payload, { scroll });
+    renderResult(session, payload, { scroll });
     return payload;
   }
 
   let latestResult = null;   // 最近一次成功的归因，收尾时补上统计信息直接复用
-  // 单步门的开关：只有"上一轮真的产出了有效回答"才该停下来等用户。
-  // 报错、数字不足这些没有产出的轮次不算数——那种情况下自动继续下一轮才对，
-  // 否则用户点一次单步只得到一次失败，还得反复点，白白浪费挑战次数。
-  let stepGate = false;
 
   for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
-    if (runStopped) break;
+    if (session.stopped) break;
     // 上一轮产出了有效回答，才在这里等用户点「继续下一轮」
-    if (stepMode && stepGate) {
-      renderApiProgress(states, `已获得 ${outputs.length} 份有效回答，点击「继续下一轮」发起第 ${index + 1} 轮`);
-      const pending = waitForStepClick();   // 先登记 resolve，按钮才会渲染成「继续下一轮」
+    if (session.mode === "step" && session.stepGate) {
+      renderApiProgress(session, `已获得 ${outputs.length} 份有效回答，点击「继续下一轮」发起第 ${index + 1} 轮`);
+      const pending = waitForStepClick(session);   // 先登记 resolve，按钮才会渲染成「继续下一轮」
       renderStepButton();
       await pending;
-      if (runStopped) break;
+      if (session.stopped) break;
     }
-    stepGate = false;   // 本轮开始前先复位，只有本轮真的产出有效回答才会重新置位
+    session.stepGate = false;   // 本轮开始前先复位，只有本轮真的产出有效回答才会重新置位
     states[index] = "working";
-    renderApiProgress(states, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
+    renderApiProgress(session, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
+    renderTabs();
     try {
       const payload = await probeViaStream(
         configuration,
         challenges[index],
-        applyProbeEvent,
-        runAbort.signal,
+        (event) => applyProbeEvent(session, event),
+        session.abort.signal,
       );
       if (payload.error) {
         failures.push({ attempt: index + 1, status: payload.status || 0, body: payload.body || payload.error });
         throw new Error(payload.error);
       }
       // 接口调用成功即说明端点已探明，错误卡片失去参考价值，无论数字是否达标都清空
-      resetEndpointCards();
+      resetEndpointCards(session);
       if (payload.accepted) {
         outputs.push({ text: payload.text, expected_count: challenges[index].expected_count });
         states[index] = "done";
-        stepGate = true;   // 本轮产出了有效回答：单步模式下该停下来让用户决定是否继续
+        session.stepGate = true;   // 本轮产出了有效回答：单步模式下该停下来让用户决定是否继续
         // 收到即归因：让概率表随着有效回答的份数逐份生长，而不是等满 3 份才出现
-        renderApiProgress(states, `已获得 ${outputs.length} 份有效回答，正在更新归因概率……`);
+        renderApiProgress(session, `已获得 ${outputs.length} 份有效回答，正在更新归因概率……`);
         const result = await updateResult(outputs.length === 1);
         if (result) latestResult = result;
       } else {
@@ -484,30 +633,37 @@ async function testViaApi(event, mode = "auto") {
         states[index] = "invalid";
       }
     } catch (error) {
-      if (runStopped || error.name === "AbortError") {
+      if (session.stopped || error.name === "AbortError") {
         states[index] = "error";
         break;
       }
       errors.push(`尝试 ${index + 1}: ${error.message}`);
       states[index] = "error";
     }
-    renderApiProgress(states, `当前已有 ${outputs.length}/${target} 份有效回答`);
+    renderApiProgress(session, `当前已有 ${outputs.length}/${target} 份有效回答`);
+    renderTabs();
   }
 
-  setTestRunning(false);
-  stepMode = false;
-  stepResolver = null;   // 会话结束：挂起句柄一并清掉，避免残留到下一次测试
-  if (runStopped) {
+  session.running = false;
+  session.resolver = null;   // 会话结束：挂起句柄一并清掉，避免残留
+  renderTabs();
+  if (isFocused(session)) {
+    setTestRunning();
+  }
+  if (session.stopped) {
     // 软停止：前端放弃后续挑战，后端最多跑完当前这一次请求
     states.forEach((state, stateIndex) => { if (state === "pending") states[stateIndex] = "skipped"; });
-    renderApiProgress(states, `已手动停止：${outputs.length}/${target} 份有效回答`);
+    renderApiProgress(session, `已手动停止：${outputs.length}/${target} 份有效回答`);
   } else if (outputs.length === target) {
     states.forEach((state, index) => { if (state === "pending") states[index] = "skipped"; });
   }
+  renderTabs();
 
   if (!outputs.length) {
-    if (!runStopped) renderApiProgress(states, "六次尝试后仍没有可用回答");
-    setMessage(byId("test-message"), runStopped ? "已手动停止，没有收集到可用回答。" : `没有获得可分析输出。${errors[0] || ""}`, "error");
+    if (isFocused(session)) {
+      if (!session.stopped) renderApiProgress(session, "六次尝试后仍没有可用回答");
+      setMessage(byId("test-message"), session.stopped ? "已手动停止，没有收集到可用回答。" : `没有获得可分析输出。${errors[0] || ""}`, "error");
+    }
     // 没有归因结果的失败测试不入历史：列表里只剩能从摘要一眼看懂的有效记录
     return;
   }
@@ -518,14 +674,17 @@ async function testViaApi(event, mode = "auto") {
   }
   if (!latestResult) {
     // 归因接口失败同样不入历史
-    setMessage(byId("test-message"), errors[errors.length - 1] || "API 自动测试失败。", "error");
+    if (isFocused(session)) setMessage(byId("test-message"), errors[errors.length - 1] || "API 自动测试失败。", "error");
     return;
   }
 
   const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
   latestResult.api_test = { requested: target, attempted, max_attempts: challenges.length, received: outputs.length, errors };
-  renderApiProgress(states, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
-  renderResult(latestResult, { scroll: false });   // 收尾只补统计信息，不再抢滚动
+  session.latestResult = latestResult;
+  renderApiProgress(session, `测试完成：${outputs.length}/${target} 份有效回答进入归因`);
+  renderResult(session, latestResult, { scroll: false });   // 收尾只补统计信息，不再抢滚动
+  renderTabs();
+  // appendHistory 是同步的读改回，JS 单线程下并行会话各自收尾也不会互相覆盖
   appendHistory(historyEntry(configuration, startedAt, {
     accepted: outputs.length,
     attempted,
@@ -994,20 +1153,18 @@ byId("bank-select").addEventListener("change", (event) => selectBank(event.targe
 byId("regenerate").addEventListener("click", loadChallenges);
 byId("analyze").addEventListener("click", analyzeManual);
 byId("api-test-form").addEventListener("submit", testViaApi);
-// 开始/停止共用同一个按钮：运行中点击即中断当前请求并放弃后续挑战（软停止）
-byId("api-test-start").addEventListener("click", (event) => {
-  if (!runActive) return;   // 空闲时交给表单 submit，避免重复触发
-  event.preventDefault();
-  stopTest();
-});
-// 单步按钮：空闲时等同于「开始测试」但每轮都要手点；挂起等待中则唤醒循环发下一轮
+// 主按钮恒为「开始测试」：并发的入口不能被运行中的任务占住，停止走标签的 ×
+// 单步按钮：对焦点会话生效；挂起等待中则唤醒它发下一轮
 byId("api-test-step").addEventListener("click", (event) => {
   // 它是 type="button"，本不会提交表单；这里仍拦一次，免得日后改成 submit 就静默走成自动模式
   event.preventDefault();
-  if (stepResolver) { resumeStep(); return; }
-  if (runActive) return;    // 请求在飞时按钮已禁用，这里只是兜底
+  const session = focusedSession();
+  if (session && session.resolver) { resumeStep(session); return; }
+  if (session && session.running) return;   // 请求在飞时按钮已禁用，这里只是兜底
   testViaApi(event, "step");
 });
+// 停在进度区的停止按钮：只停焦点会话
+byId("api-test-stop").addEventListener("click", () => stopSession(focusedSession()));
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });
 byId("create-bank-form").addEventListener("submit", createBank);

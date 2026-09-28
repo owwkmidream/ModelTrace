@@ -454,6 +454,138 @@ test("样式：按钮禁用态必须排除 hover 且显式换色，否则分不�
   assert.ok(disabledBlock[0].includes("color:"), "禁用态应显式设置文字色");
 });
 
+test("整合：并行提交两个任务互不阻塞，只有 2 个会话时才出现标签条", async () => {
+  // 核心并发回归：改造前 runActive 是全局互斥，跑着 A 时提交 B 会被直接 return 丢掉。
+  const numbers = acceptedNumbers();
+  const frames = [
+    { phase: "probe_start", api_format: "anthropic" },
+    { phase: "attempt", api_format: "anthropic", attempt: 1, status: 200, body: "", ok: true, done: true },
+    { phase: "probe_end", api_format: "anthropic", ok: true },
+    { phase: "result", text: numbers, api_format: "anthropic" },
+  ];
+  const { dom, upstreamCalls } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+
+  const submitHandlers = dom.lastListeners.get("api-test-form:submit");
+  const submit = () => submitHandlers[0]({
+    preventDefault() {},
+    currentTarget: { querySelector: () => ({ disabled: false }) },
+  });
+
+  // 第一个任务：单步，先停在挂起门上，模拟"一个任务还开着"
+  dom.nodes.get("test-api-model").value = "gpt-x";
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+  assert.equal(upstreamCalls.length, 1, "第一个任务应先跑完 1 轮");
+  assert.equal(dom.nodes.get("session-tabs").hidden, true, "只有 1 个会话时不应显示标签条");
+
+  // 第二个任务：换模型直接提交，不能被第一个任务挡住
+  dom.nodes.get("test-api-model").value = "claude-y";
+  await submit();
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+
+  const tabs = dom.nodes.get("session-tabs");
+  assert.equal(tabs.hidden, false, "出现多个会话时应显示标签条");
+  const html = tabs.innerHTML;
+  assert.ok(html.includes("gpt-x"), "标签应含第一个任务的模型名");
+  assert.ok(html.includes("claude-y"), "标签应含第二个任务的模型名");
+  assert.equal((html.match(/class="session-tab/g) || []).length, 2, "应渲染 2 个标签");
+  // 标签里的色块数量对齐 6 次尝试
+  const cells = (html.match(/class="tab-cell /g) || []).length;
+  assert.ok(cells >= 6, `每个标签应有对应尝试轮次的色块，实际 ${cells}`);
+});
+
+test("整合：并行时各会话的进度互相独立，新提交的任务接管焦点", async () => {
+  // 两个不变量：
+  //   1. 新提交的任务成为焦点（用户点下去就想看它）
+  //   2. 焦点切走后，原任务的进度仍留在自己的标签里，不被后来的任务冲掉
+  const numbers = acceptedNumbers();
+  const frames = [
+    { phase: "probe_start", api_format: "anthropic" },
+    { phase: "attempt", api_format: "anthropic", attempt: 1, status: 200, body: "", ok: true, done: true },
+    { phase: "probe_end", api_format: "anthropic", ok: true },
+    { phase: "result", text: numbers, api_format: "anthropic" },
+  ];
+  const { dom } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+
+  // 任务 A 单步，只跑 1 轮就挂起
+  dom.nodes.get("test-api-model").value = "model-a";
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+  assert.ok(dom.nodes.get("api-progress-count").textContent.includes("有效 1/3"),
+    "任务 A 应停在 1 份有效回答");
+
+  // 任务 B 自动跑满，接管焦点
+  dom.nodes.get("test-api-model").value = "model-b";
+  const submitHandlers = dom.lastListeners.get("api-test-form:submit");
+  await submitHandlers[0]({
+    preventDefault() {},
+    currentTarget: { querySelector: () => ({ disabled: false }) },
+  });
+  for (let index = 0; index < 200; index += 1) await Promise.resolve();
+  assert.ok(dom.nodes.get("api-progress-count").textContent.includes("有效 3/3"),
+    "新提交的任务应接管焦点并显示自己的进度");
+
+  // 关键：两个标签各自记住自己的尝试数，B 的完成没有覆盖 A 的 1/6
+  const tabs = dom.nodes.get("session-tabs").innerHTML;
+  const parsed = [...tabs.matchAll(/class="tab-label"[^>]*>([^<]+)<\/span>\s*<span class="tab-count">([\d/]+)</g)]
+    .map(([, label, count]) => ({ label, count }));
+  assert.equal(parsed.length, 2, "应有两个会话标签");
+  const tabA = parsed.find((item) => item.label.includes("model-a"));
+  const tabB = parsed.find((item) => item.label.includes("model-b"));
+  assert.ok(tabA, "标签条应含 model-a");
+  assert.ok(tabB, "标签条应含 model-b");
+  assert.equal(tabA.count, "1/6", `任务 A 的标签应保持 1/6，实际 ${tabA.count}`);
+  assert.equal(tabB.count, "3/6", `任务 B 的标签应为 3/6，实际 ${tabB.count}`);
+});
+
+test("整合：切换标签把对应会话的进度投影回主面板", async () => {
+  const numbers = acceptedNumbers();
+  const frames = [
+    { phase: "probe_start", api_format: "anthropic" },
+    { phase: "attempt", api_format: "anthropic", attempt: 1, status: 200, body: "", ok: true, done: true },
+    { phase: "probe_end", api_format: "anthropic", ok: true },
+    { phase: "result", text: numbers, api_format: "anthropic" },
+  ];
+  const { dom } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+
+  // 任务 A：单步只跑 1 轮，停在「有效 1/3」
+  dom.nodes.get("test-api-model").value = "model-a";
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+  assert.ok(dom.nodes.get("api-progress-count").textContent.includes("有效 1/3"),
+    "任务 A 应停在 1 份有效回答");
+
+  // 任务 B：自动模式跑满 3 份，成为新焦点
+  dom.nodes.get("test-api-model").value = "model-b";
+  const submitHandlers = dom.lastListeners.get("api-test-form:submit");
+  await submitHandlers[0]({
+    preventDefault() {},
+    currentTarget: { querySelector: () => ({ disabled: false }) },
+  });
+  for (let index = 0; index < 200; index += 1) await Promise.resolve();
+  assert.ok(dom.nodes.get("api-progress-count").textContent.includes("有效 3/3"),
+    "任务 B 应跑满 3 份有效回答");
+
+  // 切回任务 A：主面板要还原成 A 的进度，而不是继续显示 B 的
+  const ids = [...dom.nodes.get("session-tabs").innerHTML.matchAll(/data-session="(s\d+)"/g)]
+    .map((match) => match[1]);
+  assert.equal(ids.length, 2, "应有两个会话标签");
+  dom.fire("session-tabs", "click", {
+    target: { closest: (selector) => (selector === "[data-session]" ? { dataset: { session: ids[0] } } : null) },
+  });
+  assert.ok(dom.nodes.get("api-progress-count").textContent.includes("有效 1/3"),
+    `切回任务 A 后应显示 A 的进度，实际 ${dom.nodes.get("api-progress-count").textContent}`);
+});
+
 test("整合：本地接口不落到 Worker —— challenges/analyze 都本地完成", async () => {
   const { win } = await bootIntegration({
     probeFrames: [{ phase: "result", text: "1", api_format: "openai" }],
