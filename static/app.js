@@ -393,7 +393,9 @@ byId("session-tabs").addEventListener("click", (event) => {
   if (tabNode) focusSession(tabNode.dataset.session);
 });
 
-// 切换焦点：把该会话的进度区、端点卡片、结果表整块投影到主面板
+// 切换焦点：把该会话的进度区、端点卡片、结果表整块投影到主面板。
+// 关键点：所有要恢复的内容都必须能从 session 上读到——只活在收尾前的局部变量
+// （曾经的 latestResult）在这里会读不到，切走再切回就表现为"结果消失"。
 function focusSession(id) {
   const session = sessions.get(id);
   if (!session || session.closed) return;
@@ -401,11 +403,17 @@ function focusSession(id) {
   renderTabs();
   renderStepButton();
   setTestRunning();
+  renderSessionActions();
   if (session.states.length) {
     const valid = session.states.filter((state) => state === "done").length;
-    renderApiProgress(session, session.running
-      ? `正在进行第 ${session.states.indexOf("working") + 1} 次尝试`
-      : `有效 ${valid}/3 份回答`);
+    // 挂起等待中要沿用"点击继续"的提示，否则切回来只看到若干份有效回答，
+    // 不知道这个任务其实正停在单步门上等自己
+    const status = session.resolver
+      ? `已获得 ${valid} 份有效回答，点击「继续下一轮」发起下一轮`
+      : session.running
+        ? `正在进行第 ${session.states.indexOf("working") + 1} 次尝试`
+        : `有效 ${valid}/3 份回答`;
+    renderApiProgress(session, status);
   } else {
     byId("api-test-progress").hidden = true;
   }
@@ -438,6 +446,7 @@ function closeSession(id) {
     byId("endpoint-cards").innerHTML = "";
     byId("endpoint-cards").hidden = true;
     renderStepButton();
+    renderSessionActions();
   }
 }
 
@@ -473,7 +482,9 @@ function createSession(configuration, mode) {
   return session;
 }
 
-// 主按钮恒为「开始测试」：并发的入口不能被运行中的任务占住
+// 主按钮恒为「开始测试」：设置卡片里的两个按钮只负责"派发新任务"，
+// 永不改成"停止"或"继续"，这样跑着 A 也能再派发 B，不会出现
+// "想派发新任务、按钮却是继续或禁用"的歧义。停止与继续都在下方标签页里。
 function setTestRunning() {
   const button = byId("api-test-start");
   button.textContent = "开始测试";
@@ -482,22 +493,27 @@ function setTestRunning() {
   renderStepButton();
 }
 
-// 单步按钮跟随焦点会话的三态：空闲/单步测试；挂起/继续下一轮；在飞/请求中（禁用）
+// 设置卡片里的「单步测试」永远只做派发，文案固定，不随焦点会话变脸
 function renderStepButton() {
   const button = byId("api-test-step");
+  button.textContent = "单步测试";
+  button.disabled = false;
+}
+
+// 标签页里的会话操作按钮：继续（挂起时）/ 停止当前任务（运行中）。
+// 只操作焦点会话，随焦点切换重绘。
+function renderSessionActions() {
   const session = focusedSession();
+  const resumeButton = byId("api-test-resume");
+  const stopButton = byId("api-test-stop");
   if (!session || !session.running) {
-    button.textContent = "单步测试";
-    button.disabled = false;
+    resumeButton.hidden = true;
+    stopButton.hidden = true;
     return;
   }
-  if (session.resolver) {
-    button.textContent = "继续下一轮";
-    button.disabled = false;
-    return;
-  }
-  button.textContent = session.mode === "step" ? "请求中……" : "单步测试";
-  button.disabled = true;
+  // 挂起在单步门上才需要"继续"；请求在飞时只给"停止"
+  resumeButton.hidden = !session.resolver;
+  stopButton.hidden = Boolean(session.resolver);
 }
 
 // 把循环挂起在单步门上：返回的 Promise 只在用户点单步或点停止时才结算
@@ -513,7 +529,7 @@ function resumeStep(session) {
   const resume = session.resolver;
   session.resolver = null;
   resume();
-  renderStepButton();
+  renderSessionActions();
 }
 
 // 停止：置位停止标志、中止在途请求，并唤醒可能挂起的单步门
@@ -544,6 +560,7 @@ async function runTestSession(configuration, mode = "auto") {
   session.label = `${configNameFor(configuration.base_url, configuration.api_key) || shortUrl(configuration.base_url)} · ${configuration.api_model} #${session.seq}`;
   renderTabs();
   renderStepButton();
+  renderSessionActions();
   byId("result").hidden = true;
 
   const startedAt = session.startedAt;
@@ -588,6 +605,8 @@ async function runTestSession(configuration, mode = "auto") {
       return null;
     }
     renderResult(session, payload, { scroll });
+    // 立刻落到会话上：只存在局部变量的话，收尾前切走再切回就恢复不出这份结果
+    session.latestResult = payload;
     return payload;
   }
 
@@ -598,8 +617,8 @@ async function runTestSession(configuration, mode = "auto") {
     // 上一轮产出了有效回答，才在这里等用户点「继续下一轮」
     if (session.mode === "step" && session.stepGate) {
       renderApiProgress(session, `已获得 ${outputs.length} 份有效回答，点击「继续下一轮」发起第 ${index + 1} 轮`);
-      const pending = waitForStepClick(session);   // 先登记 resolve，按钮才会渲染成「继续下一轮」
-      renderStepButton();
+      const pending = waitForStepClick(session);   // 先登记 resolve，标签页才会画出「继续下一轮」
+      renderSessionActions();
       await pending;
       if (session.stopped) break;
     }
@@ -649,6 +668,7 @@ async function runTestSession(configuration, mode = "auto") {
   renderTabs();
   if (isFocused(session)) {
     setTestRunning();
+    renderSessionActions();
   }
   if (session.stopped) {
     // 软停止：前端放弃后续挑战，后端最多跑完当前这一次请求
@@ -1153,17 +1173,16 @@ byId("bank-select").addEventListener("change", (event) => selectBank(event.targe
 byId("regenerate").addEventListener("click", loadChallenges);
 byId("analyze").addEventListener("click", analyzeManual);
 byId("api-test-form").addEventListener("submit", testViaApi);
-// 主按钮恒为「开始测试」：并发的入口不能被运行中的任务占住，停止走标签的 ×
-// 单步按钮：对焦点会话生效；挂起等待中则唤醒它发下一轮
+// 设置卡片里的两个按钮都只负责「派发新任务」，不随焦点会话改变文案或可用性，
+// 所以跑着 A 也能再派发 B。停止与继续是下方标签页里的事。
 byId("api-test-step").addEventListener("click", (event) => {
   // 它是 type="button"，本不会提交表单；这里仍拦一次，免得日后改成 submit 就静默走成自动模式
   event.preventDefault();
-  const session = focusedSession();
-  if (session && session.resolver) { resumeStep(session); return; }
-  if (session && session.running) return;   // 请求在飞时按钮已禁用，这里只是兜底
   testViaApi(event, "step");
 });
-// 停在进度区的停止按钮：只停焦点会话
+// 标签页里：继续焦点会话挂起的单步门
+byId("api-test-resume").addEventListener("click", () => resumeStep(focusedSession()));
+// 标签页里：只停焦点会话
 byId("api-test-stop").addEventListener("click", () => stopSession(focusedSession()));
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });

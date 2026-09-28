@@ -344,18 +344,22 @@ test("整合：单步模式每次点击只发一轮，不会在结果渲染前�
   await stepHandlers[0]({ preventDefault() {} });
   for (let index = 0; index < 80; index += 1) await Promise.resolve();
   assert.equal(upstreamCalls.length, 1, `单步第一次点击应只发 1 次探测，实际 ${upstreamCalls.length}`);
-  assert.equal(dom.nodes.get("api-test-step").textContent, "继续下一轮", "挂起等待时应提示继续下一轮");
-  assert.equal(dom.nodes.get("api-test-step").disabled, false, "挂起等待时按钮应可点");
+  // 派发按钮文案固定不变，继续入口在标签页里（挂起时出现）
+  assert.equal(dom.nodes.get("api-test-step").textContent, "单步测试", "派发按钮文案不应随会话状态变脸");
+  assert.equal(dom.nodes.get("api-test-step").disabled, false, "派发按钮应始终可点，才能再派发下一个任务");
+  assert.equal(dom.nodes.get("api-test-resume").hidden, false, "挂起时标签页应出现「继续下一轮」");
+  assert.equal(dom.nodes.get("api-test-stop").hidden, true, "挂起时不需要停止按钮");
   // 关键回归：挂起期间绝不能自行抢跑第 2 轮
   for (let index = 0; index < 40; index += 1) await Promise.resolve();
   assert.equal(upstreamCalls.length, 1, "挂起期间不应再发探测");
 
-  // 第二次点：唤醒循环，发第 2 轮
-  await stepHandlers[0]({ preventDefault() {} });
-  // 唤醒后按钮必须立刻变「请求中……」并禁用：循环恢复要等一个微任务，
-  // 不在这里重绘的话，按钮会停在整个请求期间都显示成「继续下一轮」的可点外观。
-  assert.equal(dom.nodes.get("api-test-step").textContent, "请求中……", "唤醒后应立刻显示请求中");
-  assert.equal(dom.nodes.get("api-test-step").disabled, true, "唤醒后到本轮结束前应禁用");
+  // 第二次点：从标签页的「继续下一轮」唤醒循环，发第 2 轮
+  const resumeHandlers = dom.lastListeners.get("api-test-resume:click");
+  await resumeHandlers[0]();
+  // 唤醒后继续按钮必须立刻收掉：循环恢复要等一个微任务，
+  // 不在这里重绘的话，按钮会停在整个请求期间都显示成可点的外观。
+  assert.equal(dom.nodes.get("api-test-resume").hidden, true, "唤醒后应立刻收起继续按钮");
+  assert.equal(dom.nodes.get("api-test-stop").hidden, false, "请求在飞时应显示停止按钮");
   for (let index = 0; index < 80; index += 1) await Promise.resolve();
   assert.equal(upstreamCalls.length, 2, `第二次点击应发第 2 轮，实际 ${upstreamCalls.length}`);
 });
@@ -380,7 +384,7 @@ test("整合：单步模式下首轮数字不足时自动续跑，直到真正�
   for (let index = 0; index < 120; index += 1) await Promise.resolve();
 
   assert.equal(upstreamCalls.length, 2, `首轮无产出应自动续跑第 2 轮，实际发了 ${upstreamCalls.length} 次`);
-  assert.equal(dom.nodes.get("api-test-step").textContent, "继续下一轮", "产出有效回答后才应停下等点击");
+  assert.equal(dom.nodes.get("api-test-resume").hidden, false, "产出有效回答后才应出现「继续下一轮」");
 
   // 停在这里等用户：不会再自行抢跑
   for (let index = 0; index < 40; index += 1) await Promise.resolve();
@@ -403,7 +407,51 @@ test("整合：单步模式下接口报错时同样自动续跑", async () => {
   for (let index = 0; index < 120; index += 1) await Promise.resolve();
 
   assert.equal(upstreamCalls.length, 2, `首轮报错应自动续跑第 2 轮，实际发了 ${upstreamCalls.length} 次`);
-  assert.equal(dom.nodes.get("api-test-step").textContent, "继续下一轮", "产出有效回答后才应停下等点击");
+  assert.equal(dom.nodes.get("api-test-resume").hidden, false, "产出有效回答后才应出现「继续下一轮」");
+});
+
+test("整合：单步产出 1 份结果后切走再切回，结果仍要恢复", async () => {
+  // 回归：latestResult 原本只是 runTestSession 的局部变量，只有收尾才写进 session。
+  // 于是"1 份有效回答已出结果 → 切到别的标签 → 切回来"会读不到结果，面板被隐藏，
+  // 表现为结果凭空消失。判定是每收到一份有效回答就立刻做，所以这份结果必须可恢复。
+  const numbers = acceptedNumbers();
+  const frames = [
+    { phase: "probe_start", api_format: "anthropic" },
+    { phase: "attempt", api_format: "anthropic", attempt: 1, status: 200, body: "", ok: true, done: true },
+    { phase: "probe_end", api_format: "anthropic", ok: true },
+    { phase: "result", text: numbers, api_format: "anthropic" },
+  ];
+  const { dom } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+
+  // 任务 A：单步跑 1 轮，拿到结果后停在门上
+  dom.nodes.get("test-api-model").value = "model-a";
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 120; index += 1) await Promise.resolve();
+  assert.equal(dom.nodes.get("result").hidden, false, "任务 A 出 1 份结果后应显示结果面板");
+  const resultHtml = dom.nodes.get("result").innerHTML;
+  assert.ok(resultHtml.length > 0, "结果面板应有内容");
+
+  // 派发任务 B 接走焦点，A 的结果面板被 B 取代
+  dom.nodes.get("test-api-model").value = "model-b";
+  const submitHandlers = dom.lastListeners.get("api-test-form:submit");
+  await submitHandlers[0]({
+    preventDefault() {},
+    currentTarget: { querySelector: () => ({ disabled: false }) },
+  });
+  for (let index = 0; index < 60; index += 1) await Promise.resolve();
+
+  // 切回 A：那份中途产出的结果必须还在
+  const ids = [...dom.nodes.get("session-tabs").innerHTML.matchAll(/data-session="(s\d+)"/g)]
+    .map((match) => match[1]);
+  assert.equal(ids.length, 2, "应有两个会话标签");
+  dom.fire("session-tabs", "click", {
+    target: { closest: (selector) => (selector === "[data-session]" ? { dataset: { session: ids[0] } } : null) },
+  });
+  assert.equal(dom.nodes.get("result").hidden, false, "切回任务 A 后结果面板不应被隐藏");
+  assert.equal(dom.nodes.get("result").innerHTML, resultHtml, "切回后应恢复同一份结果");
 });
 
 test("整合：自动模式仍然连发，一测到底拿满 3 份", async () => {

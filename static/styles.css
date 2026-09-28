@@ -298,7 +298,10 @@ label code { color: var(--primary-dark); }
 }
 .tab-close:hover { color: var(--on-danger); background: var(--danger); }
 .endpoint-heading { display: flex; justify-content: flex-end; margin-top: 11px; }
+.progress-actions { display: flex; align-items: center; gap: 8px; }
+.progress-actions > span { font-variant-numeric: tabular-nums; }
 .button.compact { min-height: 28px; padding: 5px 10px; font-size: 11px; }
+.button[hidden] { display: none; }
 
 .progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 9px; }
 .progress-heading strong { font-size: 12px; }
