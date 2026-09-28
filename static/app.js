@@ -322,6 +322,11 @@ function renderApiProgress(states, status) {
 let runAbort = null;
 let runActive = false;
 let runStopped = false;
+// 单步模式：每轮开始前把循环挂在「单步测试」按钮上，等用户再点一次才发下一次上游请求。
+// 存在的意义是自动模式会在结果渲染出来之前就发起下一轮（归因往返只要几十毫秒，
+// 用户根本来不及点停止），单步保证每次都能先看到结果再决定要不要继续，不多打上游。
+let stepMode = false;
+let stepResolver = null;   // 挂起时存下的 resolve，点单步或停止时唤醒
 
 // 一个按钮两种身份：空闲时是「开始测试」，运行中变成「停止测试」
 function setTestRunning(running) {
@@ -331,6 +336,37 @@ function setTestRunning(running) {
   button.className = `button ${running ? "danger" : "primary"}`;
   button.disabled = false;
   if (running) byId("api-test-progress").hidden = false;
+  renderStepButton();
+}
+
+// 单步按钮的三种身份：空闲=单步测试；挂起等待中=继续下一轮；请求在飞=请求中（禁用）
+function renderStepButton() {
+  const button = byId("api-test-step");
+  if (!runActive) {
+    button.textContent = "单步测试";
+    button.disabled = false;
+    return;
+  }
+  if (stepResolver) {
+    button.textContent = "继续下一轮";
+    button.disabled = false;
+    return;
+  }
+  button.textContent = stepMode ? "请求中……" : "单步测试";
+  button.disabled = true;
+}
+
+// 把循环挂起在单步门上：返回的 Promise 只在用户点单步或点停止时才结算
+function waitForStepClick() {
+  return new Promise((resolve) => { stepResolver = resolve; });
+}
+
+// 唤醒挂起的单步循环；没有挂起时是空操作
+function resumeStep() {
+  if (!stepResolver) return;
+  const resume = stepResolver;
+  stepResolver = null;
+  resume();
 }
 
 function stopTest() {
@@ -338,14 +374,17 @@ function stopTest() {
   runStopped = true;
   byId("api-test-start").disabled = true;   // 中断期间防重复点击，收尾时统一恢复
   if (runAbort) runAbort.abort();
+  resumeStep();   // 挂起在单步门上时也要唤醒，否则永远走不到收尾
 }
 
-async function testViaApi(event) {
+async function testViaApi(event, mode = "auto") {
   event.preventDefault();
   if (runActive) return;   // 运行中再次提交（回车等）不重入
   byId("result").hidden = true;
   setMessage(byId("test-message"), "");
   runStopped = false;
+  stepMode = mode === "step";
+  stepResolver = null;
   runAbort = new AbortController();
   setTestRunning(true);
 
@@ -401,6 +440,14 @@ async function testViaApi(event) {
 
   for (let index = 0; index < challenges.length && outputs.length < target; index += 1) {
     if (runStopped) break;
+    // 单步模式下每轮开始前都等用户再点一次；第 1 轮是本次点击本身触发的，不用再等
+    if (stepMode && index > 0) {
+      renderApiProgress(states, `已完成 ${index} 轮，点击「继续下一轮」发起第 ${index + 1} 轮`);
+      const pending = waitForStepClick();   // 先登记 resolve，按钮才会渲染成「继续下一轮」
+      renderStepButton();
+      await pending;
+      if (runStopped) break;
+    }
     states[index] = "working";
     renderApiProgress(states, `正在进行第 ${index + 1} 次尝试，等待模型完整输出……`);
     try {
@@ -439,6 +486,8 @@ async function testViaApi(event) {
   }
 
   setTestRunning(false);
+  stepMode = false;
+  stepResolver = null;   // 会话结束：挂起句柄一并清掉，避免残留到下一次测试
   if (runStopped) {
     // 软停止：前端放弃后续挑战，后端最多跑完当前这一次请求
     states.forEach((state, stateIndex) => { if (state === "pending") states[stateIndex] = "skipped"; });
@@ -941,6 +990,14 @@ byId("api-test-start").addEventListener("click", (event) => {
   if (!runActive) return;   // 空闲时交给表单 submit，避免重复触发
   event.preventDefault();
   stopTest();
+});
+// 单步按钮：空闲时等同于「开始测试」但每轮都要手点；挂起等待中则唤醒循环发下一轮
+byId("api-test-step").addEventListener("click", (event) => {
+  // 它是 type="button"，本不会提交表单；这里仍拦一次，免得日后改成 submit 就静默走成自动模式
+  event.preventDefault();
+  if (stepResolver) { resumeStep(); return; }
+  if (runActive) return;    // 请求在飞时按钮已禁用，这里只是兜底
+  testViaApi(event, "step");
 });
 byId("auto-enrollment").addEventListener("submit", enrollAutomatically);
 byId("show-create-bank").addEventListener("click", () => { byId("create-bank-form").hidden = !byId("create-bank-form").hidden; });

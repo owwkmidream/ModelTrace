@@ -93,6 +93,15 @@ function workerSseResponse(frames) {
   }), { status: 200, headers: { "Content-Type": "text/event-stream" } });
 }
 
+/**
+ * 一份"必然被计入"的回答：挑战的 expected_count 是 292~332，验收阈值是它的 55%
+ * （约 161~183），所以固定产出 300 个数字才能稳定越过所有挑战的阈值。
+ * 用 120 之类的小样本会被判为"数字不足"，让自动模式跑满 6 轮而不是 3 轮。
+ */
+function acceptedNumbers() {
+  return Array.from({ length: 300 }, (_, index) => (index % 355) + 1).join(" ");
+}
+
 async function bootIntegration({ probeFrames, expectedModel = "gpt-5.4" }) {
   const html = await readFile(join(PUBLIC, "index.html"), "utf8");
   const dom = createDom(await pageIds());
@@ -308,6 +317,66 @@ test("整合：探测命中的格式写入本地缓存，第二个挑战带上 p
   assert.ok(upstreamCalls.length >= 2, `应至少发两次探测（每次挑战一次），实际 ${upstreamCalls.length}`);
   assert.equal(upstreamCalls[0].preferred_format, undefined, "第一次没有缓存");
   assert.equal(upstreamCalls[1].preferred_format, "anthropic", "第二次应带上缓存格式");
+});
+
+test("整合：单步模式每次点击只发一轮，不会在结果渲染前抢跑下一轮", async () => {
+  // 存在的意义：自动模式拿到第 1 份有效回答后会立刻发第 2 轮（归因往返只要几十毫秒），
+  // 用户看到结果再点停止时第 2 次上游调用已经发出去了。单步必须保证"点一次只打一轮"。
+  const numbers = acceptedNumbers();
+  const frames = [
+    { phase: "probe_start", api_format: "anthropic" },
+    { phase: "attempt", api_format: "anthropic", attempt: 1, status: 200, body: "", ok: true, done: true },
+    { phase: "probe_end", api_format: "anthropic", ok: true },
+    { phase: "result", text: numbers, api_format: "anthropic" },
+  ];
+  const { dom, upstreamCalls } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+  dom.nodes.get("test-api-model").value = "gpt-x";
+
+  const stepHandlers = dom.lastListeners.get("api-test-step:click");
+  assert.ok(stepHandlers && stepHandlers.length, "单步按钮应绑定点击处理");
+
+  // 第一次点：建会话，只跑第 1 轮
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+  assert.equal(upstreamCalls.length, 1, `单步第一次点击应只发 1 次探测，实际 ${upstreamCalls.length}`);
+  assert.equal(dom.nodes.get("api-test-step").textContent, "继续下一轮", "挂起等待时应提示继续下一轮");
+  assert.equal(dom.nodes.get("api-test-step").disabled, false, "挂起等待时按钮应可点");
+  // 关键回归：挂起期间绝不能自行抢跑第 2 轮
+  for (let index = 0; index < 40; index += 1) await Promise.resolve();
+  assert.equal(upstreamCalls.length, 1, "挂起期间不应再发探测");
+
+  // 第二次点：唤醒循环，发第 2 轮
+  await stepHandlers[0]({ preventDefault() {} });
+  for (let index = 0; index < 80; index += 1) await Promise.resolve();
+  assert.equal(upstreamCalls.length, 2, `第二次点击应发第 2 轮，实际 ${upstreamCalls.length}`);
+});
+
+test("整合：自动模式仍然连发，一测到底拿满 3 份", async () => {
+  // 单步是新增分支，自动模式的既有行为不能被改坏
+  const numbers = acceptedNumbers();
+  const frames = [
+    { phase: "probe_start", api_format: "anthropic" },
+    { phase: "attempt", api_format: "anthropic", attempt: 1, status: 200, body: "", ok: true, done: true },
+    { phase: "probe_end", api_format: "anthropic", ok: true },
+    { phase: "result", text: numbers, api_format: "anthropic" },
+  ];
+  const { dom, upstreamCalls } = await bootIntegration({ probeFrames: frames });
+  dom.nodes.get("test-api-base").value = "https://relay.example";
+  dom.nodes.get("test-api-key").value = "sk-test";
+  dom.nodes.get("test-api-model").value = "gpt-x";
+
+  const submitHandlers = dom.lastListeners.get("api-test-form:submit");
+  await submitHandlers[0]({
+    preventDefault() {},
+    currentTarget: { querySelector: () => ({ disabled: false }) },
+  });
+  for (let index = 0; index < 200; index += 1) await Promise.resolve();
+
+  assert.equal(upstreamCalls.length, 3, `自动模式应连发到拿满 3 份，实际 ${upstreamCalls.length}`);
+  assert.equal(dom.nodes.get("api-test-step").textContent, "单步测试", "结束后单步按钮应复位");
+  assert.equal(dom.nodes.get("api-test-start").textContent, "开始测试", "结束后开始按钮应复位");
 });
 
 test("整合：本地接口不落到 Worker —— challenges/analyze 都本地完成", async () => {

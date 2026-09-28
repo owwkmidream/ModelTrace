@@ -96,7 +96,10 @@
             </div>
             <div id="config-message" class="message" hidden></div>
             <div id="model-probe-message" class="message" hidden></div>
-            <div class="form-footer"><button class="button primary" id="api-test-start" type="submit">开始测试</button></div>
+            <div class="form-footer">
+              <button class="button secondary" id="api-test-step" type="button">单步测试</button>
+              <button class="button primary" id="api-test-start" type="submit">开始测试</button>
+            </div>
           </form>
           <section id="api-test-progress" class="progress-panel" hidden aria-live="polite">
             <div class="progress-heading"><strong id="api-progress-status">准备测试</strong><span id="api-progress-count">有效 0/3 · 已尝试 0/6</span></div>
