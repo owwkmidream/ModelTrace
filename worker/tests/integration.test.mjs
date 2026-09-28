@@ -30,13 +30,15 @@ function createDom(ids) {
     textContent: "",
     className: "",
     dataset: {},
+    attributes: {},
     style: {},
     addEventListener(type, handler) {
       const key = `${id}:${type}`;
       if (!listeners.has(key)) listeners.set(key, []);
       listeners.get(key).push(handler);
     },
-    setAttribute() {},
+    // 主题按钮靠 setAttribute 写 aria-pressed / aria-label，桩要留痕才能断言
+    setAttribute(name, value) { this.attributes[name] = String(value); },
     focus() {},
     scrollIntoView() {},
     querySelectorAll: () => [],
@@ -50,6 +52,8 @@ function createDom(ids) {
     getElementById: (id) => nodes.get(id) || makeNode(id),
     querySelectorAll: () => [],
     addEventListener() {},
+    // app.js 的主题逻辑读写 documentElement.dataset.theme，桩必须提供
+    documentElement: { dataset: {} },
   };
 
   return {
@@ -324,4 +328,29 @@ test("整合：app.js 作为模块加载后，关键函数仍正常工作（无 
   assert.ok(response.ok, "真实指纹核心应能完成归因");
   assert.ok(payload.prediction_name, "应给出预测模型");
   assert.ok(Array.isArray(payload.results) && payload.results.length > 0, "应给出候选列表");
+});
+
+test("整合：主题切换写入 data-theme 与 localStorage，按钮文案随状态反转", async () => {
+  const { dom, win } = await bootIntegration({
+    probeFrames: [{ phase: "result", text: "1", api_format: "openai" }],
+  });
+
+  // 无存储值时按浅色起步，按钮提示「切到深色」
+  assert.equal(dom.document.documentElement.dataset.theme, "light", "默认应为浅色");
+  assert.equal(dom.nodes.get("theme-toggle-label").textContent, "深色模式");
+  assert.equal(dom.nodes.get("theme-toggle-icon").textContent, "☀");
+  assert.equal(dom.nodes.get("theme-toggle").attributes["aria-pressed"], "false");
+
+  // 点一次切到深色：data-theme、按钮外观、持久化都要跟上
+  dom.fire("theme-toggle", "click");
+  assert.equal(dom.document.documentElement.dataset.theme, "dark", "点击后应切到深色");
+  assert.equal(dom.nodes.get("theme-toggle-label").textContent, "浅色模式");
+  assert.equal(dom.nodes.get("theme-toggle-icon").textContent, "☾");
+  assert.equal(dom.nodes.get("theme-toggle").attributes["aria-pressed"], "true");
+  assert.equal(win.localStorage.getItem("modeltrace.theme"), "dark", "主题应被持久化");
+
+  // 再点一次切回浅色
+  dom.fire("theme-toggle", "click");
+  assert.equal(dom.document.documentElement.dataset.theme, "light", "再次点击应切回浅色");
+  assert.equal(win.localStorage.getItem("modeltrace.theme"), "light");
 });

@@ -11,6 +11,8 @@ const byId = (id) => document.getElementById(id);
 const CONFIG_KEY = "modeltrace.configs";
 const HISTORY_KEY = "modeltrace.history";
 const HISTORY_LIMIT = 200;
+// 主题键与 templates/index.html 头部脚本共用，两处必须一致
+const THEME_KEY = "modeltrace.theme";
 
 function readStore(key) {
   try {
@@ -1008,6 +1010,39 @@ byId("history-clear").addEventListener("click", () => {
   writeStore(HISTORY_KEY, []);
   renderHistory();
 });
+
+// ── 主题切换 ──
+// 首帧主题已由 templates/index.html 头部脚本写入 data-theme（避免深色偏好下闪一帧浅色），
+// 这里只负责同步按钮外观、处理点击后的切换与持久化，避免两处各写一套判断。
+function applyTheme(theme) {
+  const dark = theme === "dark";
+  // 测试桩没有 documentElement，线上恒有；统一按可选处理以免抛错
+  const root = document.documentElement;
+  if (root) root.dataset.theme = dark ? "dark" : "light";
+  // 图标与文案表达的是「点下去会切到哪」，不是当前状态
+  byId("theme-toggle-icon").textContent = dark ? "☾" : "☀";
+  byId("theme-toggle-label").textContent = dark ? "浅色模式" : "深色模式";
+  const button = byId("theme-toggle");
+  button.setAttribute("aria-pressed", String(dark));
+  button.setAttribute("aria-label", dark ? "切换到浅色模式" : "切换到深色模式");
+}
+
+function currentTheme() {
+  const root = document.documentElement;
+  return root && root.dataset.theme === "dark" ? "dark" : "light";
+}
+
+byId("theme-toggle").addEventListener("click", () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  applyTheme(next);
+  try {
+    window.localStorage.setItem(THEME_KEY, next);
+  } catch (error) {
+    // 无痕模式等场景 localStorage 可能不可写：主题当次仍生效，不影响其它功能
+  }
+});
+
+applyTheme(currentTheme());
 
 renderConfigList();
 renderHistory();

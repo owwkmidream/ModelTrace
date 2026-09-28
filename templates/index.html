@@ -6,6 +6,20 @@
   <title>ModelTrace</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='repository-link.css') }}">
+  <script>
+    // 主题必须在首帧之前定下，否则深色偏好下会先闪一帧浅色底。
+    // 这里只负责定值；按钮的图标与文案由 app.js 启动时按该值同步。
+    (function () {
+      var THEME_KEY = "modeltrace.theme";
+      try {
+        var saved = localStorage.getItem(THEME_KEY);
+        var dark = saved ? saved === "dark" : window.matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.dataset.theme = dark ? "dark" : "light";
+      } catch (error) {
+        document.documentElement.dataset.theme = "light";
+      }
+    })();
+  </script>
 </head>
 <body>
   <header class="topbar">
@@ -25,6 +39,11 @@
         <button class="nav-button" data-workspace="library" type="button"><span class="nav-icon">02</span><span><strong>指纹库管理</strong></span></button>
         <button class="nav-button" data-workspace="history" type="button"><span class="nav-icon">03</span><span><strong>历史记录</strong></span></button>
       </nav>
+      <!-- 主题切换贴底。图标与文案由 app.js 按当前主题写入，避免和首帧脚本的判断重复 -->
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-pressed="false">
+        <span class="theme-toggle-icon" id="theme-toggle-icon" aria-hidden="true">☀</span>
+        <span class="theme-toggle-label" id="theme-toggle-label">深色模式</span>
+      </button>
     </aside>
 
     <main class="main-content">
