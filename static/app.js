@@ -361,12 +361,15 @@ function waitForStepClick() {
   return new Promise((resolve) => { stepResolver = resolve; });
 }
 
-// 唤醒挂起的单步循环；没有挂起时是空操作
+// 唤醒挂起的单步循环；没有挂起时是空操作。
+// 唤醒后立刻重绘按钮：循环恢复是异步的（要等一个微任务），这段时间里按钮必须
+// 显示成「请求中……」并禁用，否则会一直停在「继续下一轮」的可点外观上。
 function resumeStep() {
   if (!stepResolver) return;
   const resume = stepResolver;
   stepResolver = null;
   resume();
+  renderStepButton();
 }
 
 function stopTest() {

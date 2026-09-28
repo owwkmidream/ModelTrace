@@ -212,11 +212,26 @@ html.theme-switching *::after {
 .panel-toolbar span, .action-row > span, .form-footer > span { color: var(--muted); font-size: 11px; }
 .button { min-height: 35px; padding: 8px 13px; border-radius: 7px; font-size: 12px; font-weight: 650; }
 .button.primary { color: var(--on-primary); background: var(--primary); border: 1px solid var(--primary); }
-.button.primary:hover { background: var(--primary-hover); }
 .button.secondary { color: var(--text); background: var(--control-bg); border: 1px solid var(--line-strong); }
-.button.secondary:hover { background: var(--surface-soft); }
 .button.danger { color: var(--on-danger); background: var(--danger); border: 1px solid var(--danger); }
-.button.danger:hover { background: var(--danger-hover); }
+/* hover 必须排除禁用态：`.button.secondary:hover` 的优先级(0,3,0)高于
+   `button:disabled`(0,1,1)，不禁用 hover 的话禁用按钮照样会变色，
+   看起来仍可点——测试运行中光看颜色分不出「请求中」和「可点」。 */
+.button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+.button.secondary:hover:not(:disabled) { background: var(--surface-soft); }
+.button.danger:hover:not(:disabled) { background: var(--danger-hover); }
+/* 禁用态显式换底色与文字色，不能只靠全局那条 opacity: .6：
+   深色下 --control-bg(#1f2836) 与 --surface-soft(#1c2432) 本就几乎同色，
+   降透明度后和可点状态几乎无法分辨（实心主色按钮尤其明显）。
+   换成灰底灰字后，禁用与可点在深浅两套主题下都是一眼可辨的差别。 */
+.button:disabled {
+  color: var(--muted);
+  background: var(--surface-soft);
+  border-color: var(--line);
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 1;
+}
 
 .challenge-list { display: grid; border: 1px solid var(--line); border-top: 0; background: var(--surface); }
 .challenge-item + .challenge-item { border-top: 1px solid var(--line); }

@@ -352,6 +352,10 @@ test("整合：单步模式每次点击只发一轮，不会在结果渲染前�
 
   // 第二次点：唤醒循环，发第 2 轮
   await stepHandlers[0]({ preventDefault() {} });
+  // 唤醒后按钮必须立刻变「请求中……」并禁用：循环恢复要等一个微任务，
+  // 不在这里重绘的话，按钮会停在整个请求期间都显示成「继续下一轮」的可点外观。
+  assert.equal(dom.nodes.get("api-test-step").textContent, "请求中……", "唤醒后应立刻显示请求中");
+  assert.equal(dom.nodes.get("api-test-step").disabled, true, "唤醒后到本轮结束前应禁用");
   for (let index = 0; index < 80; index += 1) await Promise.resolve();
   assert.equal(upstreamCalls.length, 2, `第二次点击应发第 2 轮，实际 ${upstreamCalls.length}`);
 });
@@ -426,6 +430,28 @@ test("整合：自动模式仍然连发，一测到底拿满 3 份", async () =>
   assert.equal(upstreamCalls.length, 3, `自动模式应连发到拿满 3 份，实际 ${upstreamCalls.length}`);
   assert.equal(dom.nodes.get("api-test-step").textContent, "单步测试", "结束后单步按钮应复位");
   assert.equal(dom.nodes.get("api-test-start").textContent, "开始测试", "结束后开始按钮应复位");
+});
+
+test("样式：按钮禁用态必须排除 hover 且显式换色，否则分不出可点与不可点", async () => {
+  // 回归：`.button.secondary:hover`(0,3,0) 优先级高于 `button:disabled`(0,1,1)，
+  // 不禁用 hover 的话禁用按钮照样会变色，看起来仍可点。深色下 --control-bg 与
+  // --surface-soft 本就几乎同色，只靠全局 opacity 降透明度也分辨不出来。
+  const css = await readFile(join(PUBLIC, "styles.css"), "utf8");
+
+  const hoverRules = [...css.matchAll(/\.button\.[a-z-]+:hover[^{]*/g)].map((match) => match[0]);
+  assert.ok(hoverRules.length >= 3, `应有 primary/secondary/danger 三条 hover 规则，实际 ${hoverRules.length}`);
+  for (const rule of hoverRules) {
+    assert.ok(
+      rule.includes(":not(:disabled)"),
+      `按钮 hover 必须排除禁用态，否则禁用按钮仍会变色：${rule.trim()}`,
+    );
+  }
+
+  // 禁用态要显式给出底色与文字色，不能只依赖全局的 opacity
+  const disabledBlock = css.match(/\.button:disabled\s*\{[^}]*\}/);
+  assert.ok(disabledBlock, "应有 .button:disabled 规则");
+  assert.ok(disabledBlock[0].includes("background:"), "禁用态应显式设置背景色");
+  assert.ok(disabledBlock[0].includes("color:"), "禁用态应显式设置文字色");
 });
 
 test("整合：本地接口不落到 Worker —— challenges/analyze 都本地完成", async () => {
