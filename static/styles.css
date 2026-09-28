@@ -32,6 +32,7 @@
   --tabs-bg: #edf0f3;             /* 分段控件外框 */
   --label: #344054;               /* 表单标签等次级正文 */
   --body-soft: #475467;           /* 代码块正文 */
+  --placeholder: #757575;         /* 占位符：贴近浏览器默认灰，浅色下观感不变 */
   --code-surface: #f8fafc;        /* pre 代码底色 */
   --focus-line: #84adff;
   --primary-line: #a9c4f5;
@@ -80,18 +81,19 @@ html[data-theme="dark"] {
   --primary-dark: #93c5fd;
   --primary-hover: #93c5fd;
   --primary-soft: #1b2a44;
-  --success: #4ade80;
+  --success: #57c98d;
   --success-soft: #14301f;
-  --warning: #fbbf24;
+  --warning: #d9a441;
   --warning-soft: #33280c;
-  --danger: #f87171;
+  --danger: #e8706a;
   --danger-soft: #3a1a19;
-  --danger-muted: #e08c85;
+  --danger-muted: #d98a83;
   --control-bg: #1f2836;
   --control-track: #2b3648;
   --tabs-bg: #1b2331;
   --label: #cbd5e1;
   --body-soft: #a5b0c0;
+  --placeholder: #98a2b3;
   --code-surface: #141b26;
   --focus-line: #60a5fa;
   --primary-line: #2f4a78;
@@ -156,6 +158,23 @@ button:disabled { cursor: wait; opacity: .6; }
 .sidebar-note { margin-top: auto; display: flex; flex-direction: column; gap: 5px; padding: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; font-size: 11px; line-height: 1.35; }
 .sidebar-note strong { color: var(--text); font-size: 12px; margin-bottom: 3px; }
 
+/* ── 主题切换过渡 ──
+   换主题是整体替换令牌，不加过渡会在一帧内硬切，观感突兀。
+   只在根节点临时挂 theme-switching 时启用，因此首屏加载与常驻交互都不受影响。
+   只过渡颜色相关属性：过渡 all 会把布局属性也带上，切换时反而卡顿。 */
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: background-color .22s ease, color .22s ease, border-color .22s ease,
+              box-shadow .22s ease, outline-color .22s ease !important;
+}
+/* 尊重系统的「减弱动态效果」：直接硬切，不做过渡 */
+@media (prefers-reduced-motion: reduce) {
+  html.theme-switching *,
+  html.theme-switching *::before,
+  html.theme-switching *::after { transition: none !important; }
+}
+
 /* ── 侧边栏底部主题切换 ──
    margin-top: auto 把它推到侧边栏底部（侧边栏是纵向 flex 容器）。 */
 .theme-toggle {
@@ -213,6 +232,9 @@ textarea { min-height: 142px; padding: 11px; resize: vertical; font: 11px/1.6 Co
 input { height: 38px; padding: 0 10px; font-size: 12px; }
 .form-grid select { height: 38px; padding: 0 10px; font-size: 12px; }
 textarea:focus, input:focus, .form-grid select:focus { border-color: var(--focus-line); box-shadow: var(--shadow-focus); }
+/* 占位符颜色：不定制就会吃到浏览器默认灰，在深色底上偏暗（实测对比度仅 3.22:1）。
+   浅色沿用原观感，深色改用与 --muted 同级的灰，对比度 5.76:1 达 AA。 */
+::placeholder { color: var(--placeholder); opacity: 1; }   /* Firefox 默认会再降透明度，需显式覆盖 */
 .action-row { justify-content: flex-end; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-top: 0; border-radius: 0 0 9px 9px; }
 
 .form-panel, .inventory-panel, .result-panel, .scope-panel { background: var(--surface); border: 1px solid var(--line); border-radius: 9px; }
@@ -431,10 +453,30 @@ tbody tr.winner { background: var(--primary-soft); }
 /* 实测模型与请求模型名不一致：低饱和红，视觉重量贴近灰色文字，避免抢过蓝色渠道徽章 */
 .history-model.mismatch { color: var(--danger-muted); }
 .history-outcome { color: var(--muted); }
-/* 折叠摘要徽章：配置名 / 地址回落，统一蓝色系，只表达「这是哪条线路」 */
+/* 折叠摘要徽章：配置名 / 地址回落，统一蓝色系，只表达「这是哪条线路」。
+   色号由 app.js 按配置名 hash 稳定选出（data-tone 0~7），颜色在这里按主题给。
+   浅色沿用原硬编码值，色相与顺序都不动，视觉与既有截图一致。 */
 .history-badge { border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 650; }
-.history-badge.config, .history-badge.url { color: var(--primary-dark); background: var(--primary-soft); border: 1px solid var(--primary-line-faint); }
 .history-badge.url { font-family: ui-monospace, monospace; font-weight: 500; }
+/* 8 个色号：浅色主题 */
+.history-badge[data-tone="0"] { color: #1d4ed8; background: #eff6ff; border: 1px solid #c9dcff; }
+.history-badge[data-tone="1"] { color: #0f766e; background: #effcf9; border: 1px solid #bfe9e0; }
+.history-badge[data-tone="2"] { color: #a15c07; background: #fff7e6; border: 1px solid #f0dcb0; }
+.history-badge[data-tone="3"] { color: #7c3aed; background: #f6f1ff; border: 1px solid #ded0fb; }
+.history-badge[data-tone="4"] { color: #be185d; background: #fef1f7; border: 1px solid #f8cadf; }
+.history-badge[data-tone="5"] { color: #0e7490; background: #eefaff; border: 1px solid #c2e6f2; }
+.history-badge[data-tone="6"] { color: #4d7c0f; background: #f5fce9; border: 1px solid #d8ecb4; }
+.history-badge[data-tone="7"] { color: #b45309; background: #fff5ed; border: 1px solid #f5d7bc; }
+/* 8 个色号：深色主题。改用深底亮字，避免浅色底在暗色页面上变成刺眼白块。
+   文字对底色对比度 7.97~10.60，全部达 WCAG AA。 */
+html[data-theme="dark"] .history-badge[data-tone="0"] { color: #93c5fd; background: #1b2a44; border-color: #2f4a78; }
+html[data-theme="dark"] .history-badge[data-tone="1"] { color: #5eead4; background: #10302c; border-color: #1f5049; }
+html[data-theme="dark"] .history-badge[data-tone="2"] { color: #fcd34d; background: #33280c; border-color: #5a4a1e; }
+html[data-theme="dark"] .history-badge[data-tone="3"] { color: #c4b5fd; background: #241c3d; border-color: #3f3166; }
+html[data-theme="dark"] .history-badge[data-tone="4"] { color: #f9a8d4; background: #35172a; border-color: #5c2a48; }
+html[data-theme="dark"] .history-badge[data-tone="5"] { color: #67e8f9; background: #0e2f38; border-color: #1d4f5e; }
+html[data-theme="dark"] .history-badge[data-tone="6"] { color: #bef264; background: #23310e; border-color: #3d5318; }
+html[data-theme="dark"] .history-badge[data-tone="7"] { color: #fdba74; background: #331d0c; border-color: #5c3517; }
 /* 备注徽章是用户自己的标注，与线路区分的蓝色分开，用暖色 */
 .history-note { color: var(--warning); background: var(--warning-soft); border: 1px solid var(--warning-line); border-radius: 999px; padding: 3px 10px; font-size: 11px; font-weight: 650; }
 /* 耗时贴在折叠栏尾部：推到最右侧，与左侧元数据拉开，扫视时一眼看到 */

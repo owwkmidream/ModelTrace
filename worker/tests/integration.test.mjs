@@ -52,8 +52,16 @@ function createDom(ids) {
     getElementById: (id) => nodes.get(id) || makeNode(id),
     querySelectorAll: () => [],
     addEventListener() {},
-    // app.js 的主题逻辑读写 documentElement.dataset.theme，桩必须提供
-    documentElement: { dataset: {} },
+    // app.js 的主题逻辑读写 documentElement.dataset.theme 与 classList，桩必须提供
+    documentElement: {
+      dataset: {},
+      classes: new Set(),
+      classList: {
+        add(name) { document.documentElement.classes.add(name); },
+        remove(name) { document.documentElement.classes.delete(name); },
+        contains(name) { return document.documentElement.classes.has(name); },
+      },
+    },
   };
 
   return {
@@ -90,19 +98,23 @@ async function bootIntegration({ probeFrames, expectedModel = "gpt-5.4" }) {
   const dom = createDom(await pageIds());
 
   const storage = new Map();
+  // 定时器不立即执行：主题切换要"先挂过渡类、动画结束后再摘"，需要能观察到中间态
+  const timers = [];
   const win = {
     document: dom.document,
     localStorage: {
       getItem: (key) => (storage.has(key) ? storage.get(key) : null),
       setItem: (key, value) => storage.set(key, String(value)),
       removeItem: (key) => storage.delete(key),
+      keys: () => [...storage.keys()],
     },
-    setTimeout: (fn) => { fn(); return 0; },
-    clearTimeout() {},
+    setTimeout: (fn) => { timers.push(fn); return timers.length; },
+    clearTimeout: (id) => { if (id > 0) timers[id - 1] = null; },
     setInterval: () => 0,
     clearInterval() {},
     confirm: () => true,
     alert() {},
+    runTimers: () => timers.splice(0).forEach((fn) => fn && fn()),
     // index.html 里注入的全局（与 build.mjs 产物一致）
     BANK_SUMMARIES: JSON.parse(html.match(/window\.BANK_SUMMARIES = (\{.*?\});/s)[1]),
     UNIFIED_SUMMARY: JSON.parse(html.match(/window\.UNIFIED_SUMMARY = (\{.*?\});/s)[1]),
@@ -349,8 +361,50 @@ test("整合：主题切换写入 data-theme 与 localStorage，按钮文案随�
   assert.equal(dom.nodes.get("theme-toggle").attributes["aria-pressed"], "true");
   assert.equal(win.localStorage.getItem("modeltrace.theme"), "dark", "主题应被持久化");
 
+  // 切换期间挂过渡类让换色平滑，动画结束后必须摘掉，否则会拖慢常驻交互
+  assert.ok(dom.document.documentElement.classList.contains("theme-switching"), "切换时应挂上过渡类");
+  win.runTimers();
+  assert.ok(!dom.document.documentElement.classList.contains("theme-switching"), "动画结束后应摘掉过渡类");
+
   // 再点一次切回浅色
   dom.fire("theme-toggle", "click");
   assert.equal(dom.document.documentElement.dataset.theme, "light", "再次点击应切回浅色");
   assert.equal(win.localStorage.getItem("modeltrace.theme"), "light");
+});
+
+test("整合：历史徽章只输出 data-tone 色号，颜色交给 CSS 按主题决定", async () => {
+  const { dom, win } = await bootIntegration({
+    probeFrames: [{ phase: "result", text: "1", api_format: "openai" }],
+  });
+  // 造两条历史：一条带配置名，一条只有地址，两条都要能被染色
+  // result 需带完整形状：历史详情展开时会渲染诊断与结果表
+  const resultFor = (name, probability) => ({
+    prediction_name: name, probability,
+    family_prediction_name: "GPT", family_probability: 0.99,
+    used_outputs: 1,
+    diagnostics: [{ accepted: true, parsed_numbers: 300 }],
+    results: [{ display_name: name, family_name: "GPT", probability, profile_similarity: 0.7 }],
+  });
+  win.localStorage.setItem("modeltrace.history", JSON.stringify([
+    {
+      id: "1", at: "2026-01-01T00:00:00.000Z", base_url: "https://a.example/v1", api_key: "k",
+      api_model: "gpt-x", config: "线路甲", note: "", latency_ms: 100,
+      accepted: 3, attempted: 3, result: resultFor("gpt-x", 0.9),
+    },
+    {
+      id: "2", at: "2026-01-01T00:01:00.000Z", base_url: "https://b.example/v1", api_key: "k",
+      api_model: "gpt-y", config: "", note: "", latency_ms: 100,
+      accepted: 1, attempted: 2, result: resultFor("gpt-y", 0.8),
+    },
+  ]));
+  dom.fire("history-search", "input");
+
+  const html = dom.nodes.get("history-list").innerHTML;
+  const tones = [...html.matchAll(/class="history-badge (?:config|url)" data-tone="(\d)"/g)];
+  assert.equal(tones.length, 2, "两条历史都应渲染带 data-tone 的徽章");
+  for (const [, tone] of tones) {
+    assert.ok(Number(tone) >= 0 && Number(tone) < 8, `色号应在 0~7 之间，实际 ${tone}`);
+  }
+  // 关键回归：颜色不能再由内联 style 写死，否则深色主题下会变成刺眼白块
+  assert.ok(!/history-badge[^>]*style=/.test(html), "徽章不应再带内联颜色");
 });

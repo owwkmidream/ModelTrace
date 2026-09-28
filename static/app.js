@@ -604,24 +604,17 @@ function isModelMismatch(entry) {
 
 // 折叠摘要徽章的染色：按配置名 hash 取一个固定色号。
 // 用 hash 而不是真随机，保证同一个配置每次渲染、每次刷新都是同一种颜色，便于横向比对分类。
-const BADGE_PALETTE = [
-  { color: "#1d4ed8", background: "#eff6ff", border: "#c9dcff" },
-  { color: "#0f766e", background: "#effcf9", border: "#bfe9e0" },
-  { color: "#a15c07", background: "#fff7e6", border: "#f0dcb0" },
-  { color: "#7c3aed", background: "#f6f1ff", border: "#ded0fb" },
-  { color: "#be185d", background: "#fef1f7", border: "#f8cadf" },
-  { color: "#0e7490", background: "#eefaff", border: "#c2e6f2" },
-  { color: "#4d7c0f", background: "#f5fce9", border: "#d8ecb4" },
-  { color: "#b45309", background: "#fff5ed", border: "#f5d7bc" },
-];
+// 这里只算出色号序号，具体颜色由 CSS 按 data-tone 决定——深浅两套主题各配一组，
+// 否则内联色值会把深色主题钉死在浅色底上（曾经的问题：深色下徽章是刺眼白块）。
+const BADGE_TONES = 8;
 
-function badgePaletteFor(text) {
+function badgeToneFor(text) {
   const value = String(text || "");
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {
     hash = (hash * 31 + value.charCodeAt(index)) % 100000007;   // 乘 31 滚动，取模防止溢出
   }
-  return BADGE_PALETTE[hash % BADGE_PALETTE.length];
+  return hash % BADGE_TONES;
 }
 
 function historyMatches(entry, keyword) {
@@ -666,13 +659,13 @@ function renderHistory() {
         `).join("")
       : "";
     // 折叠态徽章：有配置就显示配置名，否则回落显示地址（谁也不属于时至少能看出是哪家）。
-    // 颜色按配置名/地址 hash 稳定分配，同名同色，便于在长列表里按线路做视觉分类。
+    // 色号由配置名/地址 hash 稳定选出，同名同色，便于在长列表里按线路做视觉分类；
+    // 具体颜色交给 CSS 的 data-tone 规则，好让深浅主题各自配色。
     const badgeText = entry.config || shortUrl(entry.base_url);
-    const palette = badgePaletteFor(badgeText);
-    const badgeStyle = `color:${palette.color};background:${palette.background};border-color:${palette.border};`;
+    const badgeTone = ` data-tone="${badgeToneFor(badgeText)}"`;
     const badge = entry.config
-      ? `<span class="history-badge config" style="${badgeStyle}">${escapeHtml(entry.config)}</span>`
-      : `<span class="history-badge url" style="${badgeStyle}">${escapeHtml(shortUrl(entry.base_url))}</span>`;
+      ? `<span class="history-badge config"${badgeTone}>${escapeHtml(entry.config)}</span>`
+      : `<span class="history-badge url"${badgeTone}>${escapeHtml(shortUrl(entry.base_url))}</span>`;
     // 实测归因结果与请求时填的模型名对不上时标红。中继站常给模型起别名，
     // 所以这里的含义是"名字对不上、值得看一眼"，而不是"测错了"，因此用低饱和红。
     const mismatch = isModelMismatch(entry);
@@ -1032,9 +1025,25 @@ function currentTheme() {
   return root && root.dataset.theme === "dark" ? "dark" : "light";
 }
 
+// 切换瞬间给根节点加过渡类，让整体换色平滑过渡而不是一帧硬切。
+// 类只在切换期间存在，首屏加载与日常交互都不受影响；过渡时长与 styles.css 对齐。
+let themeSwitchTimer = null;
+
+function withThemeTransition(run) {
+  const root = document.documentElement;
+  if (!root || !root.classList) {   // 测试桩可能没有 classList，直接执行
+    run();
+    return;
+  }
+  root.classList.add("theme-switching");
+  run();
+  window.clearTimeout(themeSwitchTimer);
+  themeSwitchTimer = window.setTimeout(() => root.classList.remove("theme-switching"), 240);
+}
+
 byId("theme-toggle").addEventListener("click", () => {
   const next = currentTheme() === "dark" ? "light" : "dark";
-  applyTheme(next);
+  withThemeTransition(() => applyTheme(next));
   try {
     window.localStorage.setItem(THEME_KEY, next);
   } catch (error) {
