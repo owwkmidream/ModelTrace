@@ -107,6 +107,12 @@ function percent(value) {
 // 概率显示阈值：低于该值的候选渲染出来就是 0.0%，属于纯噪声，直接折叠
 const PROBABILITY_DISPLAY_FLOOR = 0.0005;
 
+// 一致性判定是标签与历史记录共用的核心语义，这里收敛成单一来源，避免两处实现日后漂移。
+// 中继站常给模型起别名，所以这是"名字对不上、值得看一眼"，而非"测错了"。
+function modelNamesDiffer(predicted, requested) {
+  return predicted !== requested;
+}
+
 function optionalNumber(id) {
   const value = byId(id).value.trim();
   return value === "" ? null : Number(value);
@@ -340,12 +346,21 @@ function renderApiProgress(session, status) {
 }
 
 // ── 标签条：只有 1 个会话时整体隐藏，行为与没有并发时完全一致 ──
-// 每个标签 = 6 个色块（对应 states 的六态，配色复用 .progress-step）+ 名字 + 尝试/总轮次。
-// 色块取色与主进度区同源，所以扫一眼标签就知道哪个任务卡在红/黄上。
+// 每个标签 = 6 个色块（对应 states 的六态，配色复用 .progress-step）+ 配置名 + 模型名 + 序号。
+// 色块取色与主进度区同源，所以扫一眼标签就知道哪个任务卡在红/黄上；状态全部由色块承担，
+// 这里不再重复"已尝试几轮"这类能从色块数出来的信息。
+//
+// 模型名那一段承担判定：始终显示「实测 Top1」，与请求的模型名不符时转红。
+// 还没有归因结果时退回显示请求名——那时没有可判定的对象，等有了结果再替换。
 
 // 标签名太长会撑爆标签条，这里做一次粗粒度截断，模型名本身较短、主要是地址会超
 function shortTabLabel(label) {
   return label.length <= 42 ? label : `${label.slice(0, 39)}…`;
+}
+
+// 实测模型名也可能很长（如 gemini-2.5-pro-002）。标签宽度要受控，这里单独截断。
+function shortModelName(name) {
+  return name.length <= 24 ? name : `${name.slice(0, 21)}…`;
 }
 
 function renderTabs() {
@@ -364,15 +379,19 @@ function renderTabs() {
     const cells = (states.length ? states : Array(6).fill("pending"))
       .map((state) => `<i class="tab-cell ${state}"></i>`)
       .join("");
-    const attempted = states.filter((state) => ["done", "invalid", "error"].includes(state)).length;
-    const total = states.length || 6;
     const active = session.id === focusedSessionId ? " active" : "";
     const running = session.running ? " running" : "";
+    const predicted = session.latestResult ? session.latestResult.prediction_name : "";
+    // 有实测结果就显示实测名；不符时转红，这是标签上唯一的判定信号
+    const mismatched = Boolean(predicted) && modelNamesDiffer(predicted, session.apiModel);
+    const shownModel = predicted || session.apiModel;
+    const modelTitle = mismatched
+      ? `请求模型名 ${session.apiModel}，实测更接近 ${predicted}`
+      : session.label;
     return `
       <div class="session-tab${active}${running}" data-session="${session.id}" role="tab" aria-selected="${session.id === focusedSessionId}">
         <span class="tab-cells" title="6 次尝试的进度：绿=有效 黄=数字不足 红=接口失败 灰=未开始">${cells}</span>
-        <span class="tab-label" title="${escapeHtml(session.label)}">${escapeHtml(shortTabLabel(session.label))}</span>
-        <span class="tab-count">${attempted}/${total}</span>
+        <span class="tab-label" title="${escapeHtml(modelTitle)}"><span class="tab-config">${escapeHtml(shortTabLabel(session.configLabel))}</span> · <span class="tab-model${mismatched ? " mismatch" : ""}">${escapeHtml(shortModelName(shownModel))}</span> #${session.seq}</span>
         <button class="tab-close" type="button" data-close-session="${session.id}" aria-label="关闭 ${escapeHtml(session.label)}" title="关闭">×</button>
       </div>
     `;
@@ -462,6 +481,10 @@ function createSession(configuration, mode) {
     configuration,
     mode,
     label: "",
+    // 标签渲染需要的两个字段：请求的模型名用于与实测结果比对，配置名单独存一份
+    // 以便让配置名可以收缩让位（否则整段 label 只能整体截断，模型名会被挤掉）
+    apiModel: configuration.api_model,
+    configLabel: "",
     running: true,
     stopped: false,
     closed: false,
@@ -557,7 +580,8 @@ async function testViaApi(event, mode = "auto") {
 async function runTestSession(configuration, mode = "auto") {
   const session = createSession(configuration, mode);
   // 标签名：配置名或地址 + 模型 + 序号，撞名时序号天然区分开
-  session.label = `${configNameFor(configuration.base_url, configuration.api_key) || shortUrl(configuration.base_url)} · ${configuration.api_model} #${session.seq}`;
+  session.configLabel = configNameFor(configuration.base_url, configuration.api_key) || shortUrl(configuration.base_url);
+  session.label = `${session.configLabel} · ${configuration.api_model} #${session.seq}`;
   renderTabs();
   renderStepButton();
   renderSessionActions();
@@ -836,7 +860,7 @@ function formatDuration(ms) {
 
 // 实测归因结果与请求时填的模型名对不上即视为"不一致"。没有结果的记录不参与一致性判定。
 function isModelMismatch(entry) {
-  return Boolean(entry.result && entry.result.prediction_name !== entry.api_model);
+  return Boolean(entry.result) && modelNamesDiffer(entry.result.prediction_name, entry.api_model);
 }
 
 // 折叠摘要徽章的染色：按配置名 hash 取一个固定色号。

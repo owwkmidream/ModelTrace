@@ -289,8 +289,13 @@ label code { color: var(--primary-dark); }
 .tab-cell.invalid { background: var(--warning); }
 .tab-cell.error { background: var(--danger); }
 .tab-cell.skipped { background: var(--control-track); opacity: .45; }
-.tab-label { font-weight: 650; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tab-count { font-variant-numeric: tabular-nums; opacity: .8; }
+/* 标签名 = 配置名 · 模型名 #序号。
+   模型名那一段显示实测结果：与请求名不符时转红，这是标签上唯一的判定信号。
+   配置名可以收缩（min-width:0 + 省略号），让实测名变长时先挤配置名，而不是把标签顶宽。 */
+.tab-label { display: inline-flex; align-items: center; font-weight: 650; max-width: 260px; overflow: hidden; white-space: nowrap; }
+.tab-config { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tab-model { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+.tab-model.mismatch { color: var(--danger-muted); }
 .tab-close {
   display: grid; place-items: center; width: 18px; height: 18px;
   padding: 0; color: var(--muted); background: transparent;

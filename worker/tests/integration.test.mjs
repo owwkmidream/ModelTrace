@@ -579,17 +579,14 @@ test("整合：并行时各会话的进度互相独立，新提交的任务接�
   assert.ok(dom.nodes.get("api-progress-count").textContent.includes("有效 3/3"),
     "新提交的任务应接管焦点并显示自己的进度");
 
-  // 关键：两个标签各自记住自己的尝试数，B 的完成没有覆盖 A 的 1/6
+  // 关键：两个标签各自记住自己的尝试进度，B 的完成没有覆盖 A 的。
+  // 标签上的 "已尝试数" 已移除（它只是色块非灰格数的重复），所以这里直接数各标签的色块：
+  // A 单步只产出 1 份有效回答 → 1 个绿格；B 自动跑满 → 3 个绿格。
   const tabs = dom.nodes.get("session-tabs").innerHTML;
-  const parsed = [...tabs.matchAll(/class="tab-label"[^>]*>([^<]+)<\/span>\s*<span class="tab-count">([\d/]+)</g)]
-    .map(([, label, count]) => ({ label, count }));
-  assert.equal(parsed.length, 2, "应有两个会话标签");
-  const tabA = parsed.find((item) => item.label.includes("model-a"));
-  const tabB = parsed.find((item) => item.label.includes("model-b"));
-  assert.ok(tabA, "标签条应含 model-a");
-  assert.ok(tabB, "标签条应含 model-b");
-  assert.equal(tabA.count, "1/6", `任务 A 的标签应保持 1/6，实际 ${tabA.count}`);
-  assert.equal(tabB.count, "3/6", `任务 B 的标签应为 3/6，实际 ${tabB.count}`);
+  const blocks = tabs.split('<div class="session-tab').slice(1);
+  assert.equal(blocks.length, 2, "应有两个会话标签");
+  const doneCounts = blocks.map((block) => (block.match(/tab-cell done/g) || []).length);
+  assert.deepEqual(doneCounts, [1, 3], `两个标签的有效回答数应各自独立，实际 ${doneCounts}`);
 });
 
 test("整合：切换标签把对应会话的进度投影回主面板", async () => {
