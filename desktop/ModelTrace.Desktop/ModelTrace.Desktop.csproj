@@ -1,0 +1,40 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ModelTrace.Desktop</RootNamespace>
+    <AssemblyName>ModelTrace</AssemblyName>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+
+    <!-- 单文件发布：把 Jint/Acornima 收进一个 exe。
+         注意：EnableCompressionInSingleFile 只在自包含（SelfContained=true）下受支持，
+         这里保持框架依赖模式，体积更小，依赖机器上已有的 .NET 10 桌面运行时。 -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <SelfContained>false</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <DebugType>none</DebugType>
+
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Jint" Version="4.16.4" />
+  </ItemGroup>
+
+  <!-- 评分器与指纹库随包内置一份，运行时优先使用 exe 同级的 assets/ 目录，
+       以便上游更新指纹库时只替换外部文件、无需重新编译。 -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\static\fingerprint-core.js" LogicalName="ModelTrace.assets.fingerprint-core.js" />
+    <EmbeddedResource Include="..\..\static\challenge-browser.js" LogicalName="ModelTrace.assets.challenge-browser.js" />
+    <EmbeddedResource Include="..\..\data\unified_bank.json" LogicalName="ModelTrace.assets.unified_bank.json" />
+    <!-- 浏览器控制台导出脚本：内嵌以便单文件 exe 也能「导出脚本」给用户 -->
+    <EmbeddedResource Include="..\tools\export-web-console.js" LogicalName="ModelTrace.assets.export-web-console.js" />
+  </ItemGroup>
+
+</Project>

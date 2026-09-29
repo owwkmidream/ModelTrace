@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/CryptoShim/CryptoShim.csproj" />
+    <Project Path="tests/JintEngine/JintEngine.csproj" />
+    <Project Path="tests/ManifestParity/ManifestParity.csproj" />
+    <Project Path="tests/MemoryProfile/MemoryProfile.csproj" />
+    <Project Path="tests/UpstreamUpdate/UpstreamUpdate.csproj" />
+  </Folder>
+  <Project Path="ModelTrace.Desktop/ModelTrace.Desktop.csproj" />
+</Solution>

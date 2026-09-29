@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- 目标框架必须与桌面端一致（含 -windows），否则无法引用 -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ModelTrace.Tests.ManifestParity</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 直接引用桌面端主项目，复用其 AssetStore 实现，避免复制一份逻辑导致验证失真 -->
+    <ProjectReference Include="..\..\ModelTrace.Desktop\ModelTrace.Desktop.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,75 @@
+name: 桌面端构建
+
+# 只在会影响桌面端产物的路径上运行。
+# desktop 目录整体是在独立的 desktop 分支上维护的，不会影响 Python 版与 Worker 版。
+on:
+  push:
+    paths:
+      - 'desktop/**'
+      - 'static/fingerprint-core.js'
+      - 'static/challenge-browser.js'
+      - 'data/unified_bank.json'
+      - '.github/workflows/desktop.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'static/fingerprint-core.js'
+      - 'static/challenge-browser.js'
+      - 'data/unified_bank.json'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: 还原依赖
+        run: dotnet restore desktop/ModelTrace.Desktop.slnx
+
+      - name: 构建（Release）
+        run: dotnet build desktop/ModelTrace.Desktop.slnx -c Release --no-restore
+
+      # 关键假设的回归验证：Jint 能否执行现有评分器、crypto 垫片是否正确、
+      # 以及指纹库更新所依赖的「客户端与服务端算同一份 SHA」是否仍然成立。
+      - name: 验证 Jint 引擎可执行现有评分器
+        run: dotnet run --project desktop/tests/JintEngine -c Release --no-build
+
+      - name: 验证 crypto 垫片
+        run: dotnet run --project desktop/tests/CryptoShim -c Release --no-build
+
+      # 真实联网验证：能否从上游仓库取到指纹库。
+      # 网络不可用时该测试返回 2 并跳过，不算失败（CI 环境可能受限）。
+      - name: 验证上游更新链路（需联网）
+        run: dotnet run --project desktop/tests/UpstreamUpdate -c Release --no-build
+        continue-on-error: true
+
+      # 自建镜像通道用的清单（可选能力）。
+      # 默认通道直接指向上游原仓库，不依赖本清单，因此这里只做生成与校验，不入库。
+      - name: 生成自建镜像清单
+        run: node desktop/make-manifest.mjs desktop/dist
+
+      - name: 验证清单与客户端指纹算法一致
+        run: dotnet run --project desktop/tests/ManifestParity -c Release --no-build -- desktop/dist/manifest.json
+
+      - name: 发布单文件 exe
+        run: >
+          dotnet publish desktop/ModelTrace.Desktop/ModelTrace.Desktop.csproj
+          -c Release -r win-x64 --self-contained false
+          -o desktop/publish --no-restore
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: modeltrace-desktop-win-x64
+          path: |
+            desktop/publish/ModelTrace.exe
+          if-no-files-found: error

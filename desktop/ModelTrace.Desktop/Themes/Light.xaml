@@ -1,0 +1,9 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!--
+      浅色主题占位字典。
+      Design.xaml 已提供浅色默认值，这里保持为空，
+      目的是让「主题覆盖层」始终存在，切换主题时只需替换这一项，
+      不必区分「有无覆盖层」两种情况。
+    -->
+</ResourceDictionary>

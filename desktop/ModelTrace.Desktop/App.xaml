@@ -1,0 +1,20 @@
+<Application x:Class="ModelTrace.Desktop.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:ModelTrace.Desktop.ViewModels"
+             ShutdownMode="OnMainWindowClose">
+    <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/Design.xaml" />
+                <!-- 主题覆盖层：始终位于最后，切换时替换这一项即可生效 -->
+                <ResourceDictionary Source="Themes/Light.xaml" />
+            </ResourceDictionary.MergedDictionaries>
+
+            <vm:BoolToVisibilityConverter x:Key="BoolToVisibility" />
+            <vm:IsAllConverter x:Key="IsAllConverter" />
+            <vm:IsSameConverter x:Key="IsSameConverter" />
+            <vm:IsDiffConverter x:Key="IsDiffConverter" />
+        </ResourceDictionary>
+    </Application.Resources>
+</Application>

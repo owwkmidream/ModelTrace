@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <!-- 与桌面端同框架，才能引用其 AssetUpdater 走真实代码路径 -->
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>ModelTrace.Tests.UpstreamUpdate</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\ModelTrace.Desktop\ModelTrace.Desktop.csproj" />
+  </ItemGroup>
+
+</Project>
