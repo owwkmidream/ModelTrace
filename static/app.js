@@ -354,8 +354,8 @@ function renderApiProgress(session, status) {
 // 还没有归因结果时退回显示请求名——那时没有可判定的对象，等有了结果再替换。
 
 // 标签名太长会撑爆标签条，这里做一次粗粒度截断，模型名本身较短、主要是地址会超
-function shortTabLabel(label) {
-  return label.length <= 42 ? label : `${label.slice(0, 39)}…`;
+function shortTabLabel(label, limit = 42) {
+  return label.length <= limit ? label : `${label.slice(0, limit - 1)}…`;
 }
 
 // 实测模型名也可能很长（如 gemini-2.5-pro-002）。标签宽度要受控，这里单独截断。
@@ -384,14 +384,18 @@ function renderTabs() {
     const predicted = session.latestResult ? session.latestResult.prediction_name : "";
     // 有实测结果就显示实测名；不符时转红，这是标签上唯一的判定信号
     const mismatched = Boolean(predicted) && modelNamesDiffer(predicted, session.apiModel);
-    const shownModel = predicted || session.apiModel;
+    const shownModel = shortModelName(predicted || session.apiModel);
+    // 宽度预算落在配置名上：模型名与 #序号 是判定主体，不能被截掉，
+    // 超出总预算时先压配置名（原来是整段截断，会连带砍掉模型名）。
+    const tail = ` · ${shownModel} #${session.seq}`;
+    const configText = shortTabLabel(session.configLabel, Math.max(8, 42 - tail.length));
     const modelTitle = mismatched
       ? `请求模型名 ${session.apiModel}，实测更接近 ${predicted}`
       : session.label;
     return `
       <div class="session-tab${active}${running}" data-session="${session.id}" role="tab" aria-selected="${session.id === focusedSessionId}">
         <span class="tab-cells" title="6 次尝试的进度：绿=有效 黄=数字不足 红=接口失败 灰=未开始">${cells}</span>
-        <span class="tab-label" title="${escapeHtml(modelTitle)}"><span class="tab-config">${escapeHtml(shortTabLabel(session.configLabel))}</span> · <span class="tab-model${mismatched ? " mismatch" : ""}">${escapeHtml(shortModelName(shownModel))}</span> #${session.seq}</span>
+        <span class="tab-label" title="${escapeHtml(modelTitle)}"><span class="tab-config">${escapeHtml(configText)}</span> · <span class="tab-model${mismatched ? " mismatch" : ""}">${escapeHtml(shownModel)}</span> #${session.seq}</span>
         <button class="tab-close" type="button" data-close-session="${session.id}" aria-label="关闭 ${escapeHtml(session.label)}" title="关闭">×</button>
       </div>
     `;
